@@ -1,0 +1,44 @@
+# dataset archives
+data/*.zip
+data/*.tar
+data/*.gz
+data/*.7z
+data/*.rar
+
+# dataset folders
+data/BraTS2023/
+data/ISIC2018/
+data/Task03_Liver/
+
+# outputs
+runs/
+
+# python cache/env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# model/checkpoints
+*.ckpt
+*.pth
+*.pt
+*.bin
+
+# logs
+*.log
+
+# IDE
+.idea/
+.vscode/
+
+# build
+build/
+dist/
+*.egg-info/
+
+# system
+.DS_Store
+Thumbs.db
