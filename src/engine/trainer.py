@@ -72,27 +72,6 @@ def _align_maps_for_cat(maps: list[torch.Tensor], ref: torch.Tensor | None = Non
     return [_resize_to_spatial(m, ref_spatial) for m in maps]
 
 
-def _assert_4ch_input(x: torch.Tensor, model: torch.nn.Module, tag: str) -> None:
-    if x.ndim != 5:
-        raise RuntimeError(f"[{tag}] expect 5D [B,C,D,H,W], got shape={tuple(x.shape)}")
-    c = int(x.shape[1])
-
-    expected_c = None
-    try:
-        expected_c = int(model.enc1.net[0].in_channels)  # 对应 HybridUNet
-    except Exception:
-        pass
-
-    if expected_c is not None and c != expected_c:
-        raise RuntimeError(
-            f"[{tag}] channel mismatch: input C={c}, model expects C={expected_c}, shape={tuple(x.shape)}"
-        )
-
-    # BraTS 可比性协议：固定 4 模态
-    if c != 4:
-        raise RuntimeError(f"[{tag}] BraTS protocol expects 4 channels, got shape={tuple(x.shape)}")
-
-
 class MeanTeacherTrainer:
     def __init__(self, student: torch.nn.Module, cfg: dict):
         self.cfg = cfg
@@ -116,7 +95,11 @@ class MeanTeacherTrainer:
             conv(8, 1, kernel_size=1),
         ).to(self.device)
 
-        params = list(self.student.parameters()) + list(self.reliability_mlp.parameters()) + list(self.fusion_gate_mlp.parameters())
+        params = (
+            list(self.student.parameters())
+            + list(self.reliability_mlp.parameters())
+            + list(self.fusion_gate_mlp.parameters())
+        )
         self.optim = Adam(params, lr=cfg["train"]["lr"])
         self.scheduler = CosineAnnealingLR(
             self.optim,
@@ -128,6 +111,7 @@ class MeanTeacherTrainer:
         self.grad_clip = float(cfg["train"].get("grad_clip", 0.0))
         self.ema_m = float(cfg["train"].get("ema_momentum", 0.99))
         self.mixup_alpha = float(cfg["train"].get("mixup_alpha", 0.0))
+        self.warmup_epochs = int(cfg["train"].get("warmup_epochs", 10))
 
         self.use_amp = bool(cfg["train"].get("use_amp", True)) and self.device.type == "cuda"
         self.grad_accum_steps = max(1, int(cfg["train"].get("grad_accum_steps", 1)))
@@ -246,7 +230,14 @@ class MeanTeacherTrainer:
 
         self.optim.zero_grad(set_to_none=True)
 
-        for batch in tqdm(loaders["labeled"], desc=f"train-{epoch}/{self.epochs}", leave=True, dynamic_ncols=True):
+        pbar = tqdm(
+            loaders["labeled"],
+            desc=f"train-{epoch}/{self.epochs}",
+            leave=True,
+            dynamic_ncols=True,
+        )
+
+        for batch in pbar:
             try:
                 ub = next(unlabeled_iter)
             except StopIteration:
@@ -257,9 +248,6 @@ class MeanTeacherTrainer:
             y_l = batch["label"].to(self.device)
             x_u = ub["image"].to(self.device)
             minority_score_u = ub.get("minority_score", None)
-
-            _assert_4ch_input(x_l, self.student, tag="train/labeled")
-            _assert_4ch_input(x_u, self.teacher, tag="train/unlabeled")
 
             x_l, y_l = _mixup(x_l, y_l, alpha=self.mixup_alpha)
 
@@ -285,6 +273,14 @@ class MeanTeacherTrainer:
                 if "reliability" in ab:
                     rel_cfg["enable_reliability"] = bool(ab["reliability"])
                 use_consistency = bool(ab.get("consistency", True))
+
+                # warmup：前几轮关闭易不稳定分支，先学稳主干
+                if epoch <= self.warmup_epochs:
+                    rel_cfg["enable_reliability"] = False
+                    use_consistency = False
+                    struct_lambda = 0.0
+                else:
+                    struct_lambda = self.l_struct
 
                 if minority_score_u is not None:
                     if not torch.is_tensor(minority_score_u):
@@ -360,7 +356,7 @@ class MeanTeacherTrainer:
                 )
 
                 l_feat_lambda = self.l_feat if use_consistency else 0.0
-                loss = l_sup + self.l_ssl * l_unsup + self.l_minor * l_minor + self.l_struct * l_struct + l_feat_lambda * l_feat
+                loss = l_sup + self.l_ssl * l_unsup + self.l_minor * l_minor + struct_lambda * l_struct + l_feat_lambda * l_feat
                 loss = loss / self.grad_accum_steps
 
             self.scaler.scale(loss).backward()
@@ -370,7 +366,9 @@ class MeanTeacherTrainer:
                 if self.grad_clip > 0:
                     self.scaler.unscale_(self.optim)
                     torch.nn.utils.clip_grad_norm_(
-                        list(self.student.parameters()) + list(self.reliability_mlp.parameters()) + list(self.fusion_gate_mlp.parameters()),
+                        list(self.student.parameters())
+                        + list(self.reliability_mlp.parameters())
+                        + list(self.fusion_gate_mlp.parameters()),
                         self.grad_clip,
                     )
                 self.scaler.step(self.optim)
@@ -395,7 +393,9 @@ class MeanTeacherTrainer:
             if self.grad_clip > 0:
                 self.scaler.unscale_(self.optim)
                 torch.nn.utils.clip_grad_norm_(
-                    list(self.student.parameters()) + list(self.reliability_mlp.parameters()) + list(self.fusion_gate_mlp.parameters()),
+                    list(self.student.parameters())
+                    + list(self.reliability_mlp.parameters())
+                    + list(self.fusion_gate_mlp.parameters()),
                     self.grad_clip,
                 )
             self.scaler.step(self.optim)
@@ -417,15 +417,20 @@ class MeanTeacherTrainer:
         self.student.eval()
         self.teacher.eval()
 
-        agg = {"dice": 0.0, "iou": 0.0, "precision": 0.0, "recall": 0.0, "f1": 0.0, "minority_f1": 0.0, "hd95": 0.0}
+        agg = {
+            "dice": 0.0,
+            "iou": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "minority_f1": 0.0,
+            "hd95": 0.0,
+        }
         n = 0
 
         for batch in loader:
             x = batch["image"].to(self.device)
             y = batch["label"].to(self.device)
-
-            model_for_check = self.teacher if use_teacher_ema else self.student
-            _assert_4ch_input(x, model_for_check, tag="eval")
 
             amp_ctx = (lambda: torch.amp.autocast("cuda")) if self.use_amp else nullcontext
             with amp_ctx():
@@ -434,7 +439,7 @@ class MeanTeacherTrainer:
                 else:
                     logits = self.teacher(x) if use_teacher_ema else self.student(x)
 
-            m = compute_binary_metrics(logits, y)
+            m = compute_binary_metrics(logits, y, threshold=float(self.cfg["inference"].get("threshold", 0.5)))
             agg["dice"] += m.dice
             agg["iou"] += m.iou
             agg["precision"] += m.precision

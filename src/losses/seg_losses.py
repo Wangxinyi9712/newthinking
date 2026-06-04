@@ -187,12 +187,15 @@ def unsupervised_loss(
     tau: float = 0.7,
     fused_weight: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    pseudo = teacher_probs.detach()  # soft pseudo labels
+    pseudo = teacher_probs.detach()
     _, valid_mask = dynamic_pseudo_weight(teacher_probs, tau)
     weights = fused_weight if fused_weight is not None else torch.ones_like(teacher_probs)
+
     ce = F.binary_cross_entropy_with_logits(student_logits, pseudo, reduction="none")
     weighted = ce * weights * valid_mask
-    denom = valid_mask.sum().clamp_min(1.0)
+
+    # 关键修正：分母与分子一致，避免无监督信号被异常缩小
+    denom = (weights * valid_mask).sum().clamp_min(1.0)
     return weighted.sum() / denom
 
 
