@@ -6,9 +6,9 @@ data:
   batch_size: 1
   num_workers: 0
   pin_memory: false
-  minority_oversample: true
-  minority_oversample_power: 2.0
   cache_rate: 0.1
+  minority_oversample: true
+  minority_oversample_power: 1.5
 
 model:
   in_channels: 4
@@ -22,38 +22,39 @@ train:
   epochs: 200
   ema_momentum: 0.99
   grad_clip: 1.0
-  mixup_alpha: 0.2
-  seed: [0, 1, 2]
+  mixup_alpha: 0.1
   use_amp: true
   grad_accum_steps: 2
-  warmup_epochs: 10
+  warmup_epochs: 12
+  seed: [0, 1, 2]
 
 loss:
   tau: 0.65
   lambda_ssl: 1.0
-  lambda_minor: 1.0
-  lambda_struct: 0.1
-  lambda_feat_consistency: 0.05
+  lambda_minor: 0.8
+  lambda_struct: 0.08
+  lambda_feat_consistency: 0.0
   temporal_momentum: 0.9
   feature_bank_momentum: 0.95
-  hd_weight: 0.3
+  hd_weight: 0.25
   fg_weight: 2.0
-  topo_weight: 0.1
+  topo_weight: 0.08
   focal_alpha: 0.25
   focal_gamma: 2.0
-  auto_class_weights: true
+  auto_class_weights: false
   minor_class_weights: [2.0]
+
   reliability:
     enable_reliability: true
     enable_minority_score: true
     enable_ood: true
-    w_conf: 0.40
+    w_conf: 0.45
     w_entropy: 0.20
-    w_consistency: 0.25
+    w_consistency: 0.20
     w_ood: 0.15
-    minority_reliability_boost: 0.2
+    minority_reliability_boost: 0.15
     fusion_mode: convex
-    fusion_alpha: 0.7
+    fusion_alpha: 0.75
 
 ablation_switches:
   minority_score: true
@@ -63,7 +64,7 @@ ablation_switches:
 
 inference:
   use_teacher_ema: true
-  threshold: 0.4
+  threshold: 0.40
 
 log:
   out_dir: runs/brats_group_e

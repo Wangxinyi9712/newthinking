@@ -4,48 +4,51 @@ import torch
 import torch.nn.functional as F
 from monai.losses import HausdorffDTLoss
 
-
 _HD_LOSS = HausdorffDTLoss(alpha=2.0)
 
 
+def _safe(x: torch.Tensor) -> torch.Tensor:
+    return torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
+
+
 def dice_loss(logits: torch.Tensor, target: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
-    probs = torch.sigmoid(logits)
+    probs = torch.sigmoid(logits).clamp(0.0, 1.0)
     target = target.float()
     inter = (probs * target).sum(dim=tuple(range(2, probs.ndim)))
     den = probs.sum(dim=tuple(range(2, probs.ndim))) + target.sum(dim=tuple(range(2, probs.ndim)))
-    return 1 - ((2 * inter + eps) / (den + eps)).mean()
+    out = 1 - ((2 * inter + eps) / (den + eps)).mean()
+    return _safe(out)
 
 
 def focal_loss(logits: torch.Tensor, target: torch.Tensor, alpha: float = 0.25, gamma: float = 2.0) -> torch.Tensor:
     target = target.float()
     bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
-    probs = torch.sigmoid(logits)
+    probs = torch.sigmoid(logits).clamp(1e-6, 1 - 1e-6)
     p_t = probs * target + (1 - probs) * (1 - target)
     alpha_t = alpha * target + (1 - alpha) * (1 - target)
     focal = alpha_t * (1 - p_t).pow(gamma) * bce
-    return focal.mean()
+    return _safe(focal.mean())
 
 
 def supervised_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     ce = F.binary_cross_entropy_with_logits(logits, target.float())
-    return ce + dice_loss(logits, target)
+    return _safe(ce + dice_loss(logits, target))
 
 
 def dynamic_pseudo_weight(teacher_probs: torch.Tensor, tau: float) -> tuple[torch.Tensor, torch.Tensor]:
-    if teacher_probs.shape[1] == 1:
-        confidence = torch.maximum(teacher_probs, 1.0 - teacher_probs)
-    else:
-        confidence = teacher_probs.max(dim=1, keepdim=True).values
+    tp = teacher_probs.clamp(0.0, 1.0)
+    confidence = torch.maximum(tp, 1.0 - tp) if tp.shape[1] == 1 else tp.max(dim=1, keepdim=True).values
     weights = torch.sigmoid((confidence - tau) * 10.0)
     valid_mask = (confidence > tau).float()
-    return weights, valid_mask
+    return _safe(weights), _safe(valid_mask)
 
 
 def _normalize_map(x: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+    x = _safe(x)
     dims = tuple(range(2, x.ndim))
     x_min = x.amin(dim=dims, keepdim=True)
     x_max = x.amax(dim=dims, keepdim=True)
-    return (x - x_min) / (x_max - x_min + eps)
+    return _safe((x - x_min) / (x_max - x_min + eps))
 
 
 def _entropy_map(probs: torch.Tensor) -> torch.Tensor:
@@ -66,58 +69,6 @@ def _ood_map(x_u: torch.Tensor) -> torch.Tensor:
     return _normalize_map(z)
 
 
-def feature_distance_map(student_feat: torch.Tensor, teacher_feat: torch.Tensor, mode: str = "mahalanobis") -> torch.Tensor:
-    diff = student_feat - teacher_feat
-    if mode == "mahalanobis":
-        var = teacher_feat.var(dim=tuple(range(2, teacher_feat.ndim)), keepdim=True).clamp_min(1e-6)
-        dist = (diff.pow(2) / var).mean(dim=1, keepdim=True)
-    else:
-        dist = diff.pow(2).mean(dim=1, keepdim=True)
-    return _normalize_map(dist)
-
-
-def feature_embedding_map(student_feat: torch.Tensor, teacher_feat: torch.Tensor) -> torch.Tensor:
-    sim = F.cosine_similarity(student_feat, teacher_feat, dim=1, eps=1e-6).unsqueeze(1)
-    return _normalize_map((sim + 1.0) * 0.5)
-
-
-def gradient_uncertainty_map(probs: torch.Tensor) -> torch.Tensor:
-    grads = []
-    for d in range(2, probs.ndim):
-        grads.append((torch.roll(probs, -1, dims=d) - probs).abs())
-    grad_mag = torch.stack(grads, dim=0).mean(dim=0)
-    return _normalize_map(grad_mag)
-
-
-def temporal_consistency_map(
-    teacher_probs: torch.Tensor,
-    temporal_teacher_probs: torch.Tensor | None = None,
-) -> torch.Tensor:
-    if temporal_teacher_probs is None:
-        return torch.ones_like(teacher_probs)
-    return 1.0 - _normalize_map((teacher_probs - temporal_teacher_probs).abs())
-
-
-def transformer_feature_map(feat: torch.Tensor) -> torch.Tensor:
-    return _normalize_map(feat.mean(dim=1, keepdim=True))
-
-
-def mahalanobis_ood_map(
-    teacher_feat: torch.Tensor,
-    bank_mean: torch.Tensor | None = None,
-    bank_var: torch.Tensor | None = None,
-) -> torch.Tensor:
-    dims = tuple(range(2, teacher_feat.ndim))
-    cur_mean = teacher_feat.mean(dim=dims, keepdim=True)
-    if bank_mean is None or bank_var is None:
-        var = teacher_feat.var(dim=dims, keepdim=True).clamp_min(1e-6)
-        dist = ((teacher_feat - cur_mean).pow(2) / var).mean(dim=1, keepdim=True)
-    else:
-        var = bank_var.clamp_min(1e-6)
-        dist = ((teacher_feat - bank_mean).pow(2) / var).mean(dim=1, keepdim=True)
-    return _normalize_map(dist)
-
-
 def reliability_components(
     student_probs: torch.Tensor,
     teacher_probs: torch.Tensor,
@@ -133,34 +84,22 @@ def reliability_components(
     confidence = 1.0 - _normalize_map(torch.minimum(teacher_probs, 1.0 - teacher_probs))
     entropy = 1.0 - _entropy_map(teacher_probs)
     consistency = 1.0 - _consistency_map(student_probs, teacher_probs) if enable_consistency else torch.ones_like(confidence)
-    temporal_consistency = temporal_consistency_map(teacher_probs, temporal_teacher_probs) if enable_consistency else torch.ones_like(confidence)
-
-    if student_feat is not None and teacher_feat is not None:
-        feat_dist = 1.0 - feature_distance_map(student_feat, teacher_feat, mode="mahalanobis")
-        feat_embed = feature_embedding_map(student_feat, teacher_feat)
-        tf_map = transformer_feature_map(teacher_feat)
+    if enable_ood:
+        ood = 1.0 - _ood_map(x_u)
     else:
-        feat_dist = torch.ones_like(confidence)
-        feat_embed = torch.ones_like(confidence)
-        tf_map = torch.ones_like(confidence)
+        ood = torch.ones_like(confidence)
 
-    if enable_ood and teacher_feat is not None:
-        ood = 1.0 - mahalanobis_ood_map(teacher_feat, bank_mean=bank_mean, bank_var=bank_var)
-    else:
-        ood = 1.0 - _ood_map(x_u) if enable_ood else torch.ones_like(confidence)
-
-    grad_unc = 1.0 - gradient_uncertainty_map(teacher_probs)
-
+    ones = torch.ones_like(confidence)
     return {
-        "confidence_map": confidence,
-        "entropy_map": entropy,
-        "consistency_map": consistency,
-        "ood_map": ood,
-        "feature_distance_map": feat_dist,
-        "feature_embedding_map": feat_embed,
-        "gradient_uncertainty_map": grad_unc,
-        "temporal_consistency_map": temporal_consistency,
-        "transformer_feature_map": tf_map,
+        "confidence_map": _safe(confidence),
+        "entropy_map": _safe(entropy),
+        "consistency_map": _safe(consistency),
+        "ood_map": _safe(ood),
+        "feature_distance_map": ones,
+        "feature_embedding_map": ones,
+        "gradient_uncertainty_map": ones,
+        "temporal_consistency_map": ones,
+        "transformer_feature_map": ones,
     }
 
 
@@ -168,46 +107,47 @@ def fuse_pseudo_with_reliability(
     pseudo_weight: torch.Tensor,
     reliability: torch.Tensor,
     gate_mlp: torch.nn.Module | None = None,
-    mode: str = "learnable",
-    alpha: float = 0.5,
+    mode: str = "convex",
+    alpha: float = 0.7,
 ) -> torch.Tensor:
+    pw = _safe(pseudo_weight).clamp(0.0, 1.0)
+    rel = _safe(reliability).clamp(0.0, 1.0)
     if mode == "learnable" and gate_mlp is not None:
-        gate_in = torch.cat([pseudo_weight, reliability], dim=1)
+        gate_in = torch.cat([pw, rel], dim=1)
         fused = torch.sigmoid(gate_mlp(gate_in))
-    elif mode == "convex":
-        fused = alpha * pseudo_weight + (1 - alpha) * reliability
+    elif mode == "multiply":
+        fused = pw * rel
     else:
-        fused = pseudo_weight * reliability
-    return fused.clamp(0.0, 1.0)
+        fused = alpha * pw + (1 - alpha) * rel
+    return _safe(fused).clamp(0.0, 1.0)
 
 
 def unsupervised_loss(
     student_logits: torch.Tensor,
     teacher_probs: torch.Tensor,
-    tau: float = 0.7,
+    tau: float = 0.65,
     fused_weight: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    pseudo = teacher_probs.detach()
-    _, valid_mask = dynamic_pseudo_weight(teacher_probs, tau)
-    weights = fused_weight if fused_weight is not None else torch.ones_like(teacher_probs)
+    pseudo = teacher_probs.detach().clamp(0.0, 1.0)
+    _, valid_mask = dynamic_pseudo_weight(pseudo, tau)
+    weights = fused_weight if fused_weight is not None else torch.ones_like(pseudo)
+    weights = weights.clamp(1e-3, 1.0)
 
     ce = F.binary_cross_entropy_with_logits(student_logits, pseudo, reduction="none")
-    weighted = ce * weights * valid_mask
-
-    # 关键修正：分母与分子一致，避免无监督信号被异常缩小
+    weighted = _safe(ce * weights * valid_mask)
     denom = (weights * valid_mask).sum().clamp_min(1.0)
-    return weighted.sum() / denom
+    return _safe(weighted.sum() / denom)
 
 
 def minority_dice_loss(logits: torch.Tensor, target: torch.Tensor, class_weights: torch.Tensor) -> torch.Tensor:
-    probs = torch.sigmoid(logits)
+    probs = torch.sigmoid(logits).clamp(0.0, 1.0)
     target = target.float()
     dims = tuple(range(2, probs.ndim))
     inter = (probs * target).sum(dim=dims)
     den = probs.sum(dim=dims) + target.sum(dim=dims)
     dice = (2 * inter + 1e-7) / (den + 1e-7)
     weighted = class_weights.to(logits.device).view(1, -1) * (1 - dice)
-    return weighted.mean()
+    return _safe(weighted.mean())
 
 
 def minority_sensitive_loss(
@@ -222,7 +162,7 @@ def minority_sensitive_loss(
         target.float(),
         weight=class_weights.to(logits.device).view(1, -1, *([1] * (logits.ndim - 2))),
     )
-    return weighted_bce + focal_loss(logits, target, alpha=focal_alpha, gamma=focal_gamma) + minority_dice_loss(logits, target, class_weights)
+    return _safe(weighted_bce + focal_loss(logits, target, alpha=focal_alpha, gamma=focal_gamma) + minority_dice_loss(logits, target, class_weights))
 
 
 def _gradient_magnitude(x: torch.Tensor) -> torch.Tensor:
@@ -230,29 +170,19 @@ def _gradient_magnitude(x: torch.Tensor) -> torch.Tensor:
     for dim in range(2, x.ndim):
         fwd = torch.roll(x, shifts=-1, dims=dim)
         grads.append((fwd - x).abs())
-    return torch.stack(grads, dim=0).mean(dim=0)
-
-
-def topology_connectivity_loss(probs: torch.Tensor, prior: torch.Tensor) -> torch.Tensor:
-    pred_mass = probs.sum(dim=tuple(range(2, probs.ndim)))
-    true_mass = prior.sum(dim=tuple(range(2, prior.ndim)))
-    mass_term = (pred_mass - true_mass).abs().mean()
-
-    pred_pool = F.avg_pool3d(probs, 3, stride=1, padding=1) if probs.ndim == 5 else F.avg_pool2d(probs, 3, stride=1, padding=1)
-    true_pool = F.avg_pool3d(prior, 3, stride=1, padding=1) if prior.ndim == 5 else F.avg_pool2d(prior, 3, stride=1, padding=1)
-    conn_term = (pred_pool - true_pool).abs().mean()
-    return mass_term + conn_term
+    return _safe(torch.stack(grads, dim=0).mean(dim=0))
 
 
 def structural_loss(
     logits: torch.Tensor,
     prior: torch.Tensor,
-    hd_weight: float = 0.5,
+    hd_weight: float = 0.3,
     fg_weight: float = 2.0,
-    topo_weight: float = 0.2,
+    topo_weight: float = 0.1,
 ) -> torch.Tensor:
-    probs = torch.sigmoid(logits)
-    prior = prior.float()
+    probs = torch.sigmoid(logits).clamp(0.0, 1.0)
+    prior = prior.float().clamp(0.0, 1.0)
+
     pred_edge = _gradient_magnitude(probs)
     prior_edge = _gradient_magnitude(prior)
 
@@ -261,9 +191,8 @@ def structural_loss(
     weighted_edge = ((pred_edge - prior_edge).abs() * (fg_weight * fg_mask + bg_mask)).mean()
 
     hd_term = _HD_LOSS(probs, prior)
-    topo_term = topology_connectivity_loss(probs, prior)
-    return weighted_edge + hd_weight * hd_term + topo_weight * topo_term
+    return _safe(weighted_edge + hd_weight * hd_term + topo_weight * (pred_edge - prior_edge).abs().mean())
 
 
 def feature_consistency_loss(student_feat: torch.Tensor, teacher_feat: torch.Tensor) -> torch.Tensor:
-    return F.mse_loss(student_feat, teacher_feat.detach())
+    return _safe(F.mse_loss(student_feat, teacher_feat.detach()))

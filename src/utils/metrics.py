@@ -6,7 +6,6 @@ import numpy as np
 import torch
 from scipy.spatial.distance import directed_hausdorff
 
-
 EPS = 1e-7
 
 
@@ -21,20 +20,38 @@ class SegMetrics:
     hd95: float
 
 
+def _sanitize_prob(x: torch.Tensor) -> torch.Tensor:
+    x = torch.nan_to_num(x.float(), nan=0.0, posinf=1.0, neginf=0.0)
+    return x.clamp(0.0, 1.0)
+
+
+def _sanitize_mask(x: torch.Tensor) -> torch.Tensor:
+    # 关键：target 必须二值化，避免 label 非0/1导致 tp>pred.sum()，从而 precision/dice > 1
+    x = torch.nan_to_num(x.float(), nan=0.0, posinf=1.0, neginf=0.0)
+    return (x > 0.5).float()
+
+
 def _tp_fp_fn(pred: torch.Tensor, target: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    pred = pred.float()
-    target = target.float()
+    pred = _sanitize_mask(pred)
+    target = _sanitize_mask(target)
     tp = (pred * target).sum()
-    fp = (pred * (1 - target)).sum()
-    fn = ((1 - pred) * target).sum()
+    fp = (pred * (1.0 - target)).sum()
+    fn = ((1.0 - pred) * target).sum()
     return tp, fp, fn
+
+
+def _safe_ratio(num: torch.Tensor, den: torch.Tensor) -> torch.Tensor:
+    out = (num + EPS) / (den + EPS)
+    out = torch.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0)
+    return out.clamp(0.0, 1.0)
 
 
 def _f1_from_binary(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     tp, fp, fn = _tp_fp_fn(pred, target)
-    precision = (tp + EPS) / (tp + fp + EPS)
-    recall = (tp + EPS) / (tp + fn + EPS)
-    return (2 * precision * recall + EPS) / (precision + recall + EPS)
+    precision = _safe_ratio(tp, tp + fp)
+    recall = _safe_ratio(tp, tp + fn)
+    f1 = _safe_ratio(2 * precision * recall, precision + recall)
+    return f1.clamp(0.0, 1.0)
 
 
 def _hd95_single(pred_mask: np.ndarray, target_mask: np.ndarray) -> float:
@@ -50,11 +67,16 @@ def _hd95_single(pred_mask: np.ndarray, target_mask: np.ndarray) -> float:
 
 
 def compute_hd95(pred: torch.Tensor, target: torch.Tensor) -> float:
+    pred = _sanitize_mask(pred)
+    target = _sanitize_mask(target)
+
     pred_np = pred.detach().cpu().numpy().astype(np.uint8)
     tgt_np = target.detach().cpu().numpy().astype(np.uint8)
-    vals = []
+
+    vals: list[float] = []
     for b in range(pred_np.shape[0]):
         vals.append(_hd95_single(pred_np[b, 0], tgt_np[b, 0]))
+
     finite = [v for v in vals if np.isfinite(v)]
     if not finite:
         return float("inf")
@@ -62,21 +84,32 @@ def compute_hd95(pred: torch.Tensor, target: torch.Tensor) -> float:
 
 
 def compute_binary_metrics(logits: torch.Tensor, target: torch.Tensor, threshold: float = 0.5) -> SegMetrics:
-    probs = torch.sigmoid(logits)
+    probs = _sanitize_prob(torch.sigmoid(logits))
     pred = (probs > threshold).float()
+    target = _sanitize_mask(target)
 
     tp, fp, fn = _tp_fp_fn(pred, target)
     inter = tp
     union = pred.sum() + target.sum() - inter
 
-    dice = (2 * inter + EPS) / (pred.sum() + target.sum() + EPS)
-    iou = (inter + EPS) / (union + EPS)
-    precision = (tp + EPS) / (tp + fp + EPS)
-    recall = (tp + EPS) / (tp + fn + EPS)
-    f1 = (2 * precision * recall + EPS) / (precision + recall + EPS)
+    dice = _safe_ratio(2 * inter, pred.sum() + target.sum())
+    iou = _safe_ratio(inter, union)
+    precision = _safe_ratio(tp, tp + fp)
+    recall = _safe_ratio(tp, tp + fn)
+    f1 = _safe_ratio(2 * precision * recall, precision + recall)
 
-    minority_idx = target.shape[1] - 1
-    minority_f1 = _f1_from_binary(pred[:, minority_idx : minority_idx + 1], target[:, minority_idx : minority_idx + 1])
-    hd95 = compute_hd95(pred[:, minority_idx : minority_idx + 1], target[:, minority_idx : minority_idx + 1])
+    minority_idx = max(0, target.shape[1] - 1)
+    pred_m = pred[:, minority_idx : minority_idx + 1]
+    tgt_m = target[:, minority_idx : minority_idx + 1]
+    minority_f1 = _f1_from_binary(pred_m, tgt_m)
+    hd95 = compute_hd95(pred_m, tgt_m)
 
-    return SegMetrics(float(dice), float(iou), float(precision), float(recall), float(f1), float(minority_f1), float(hd95))
+    return SegMetrics(
+        float(dice.item()),
+        float(iou.item()),
+        float(precision.item()),
+        float(recall.item()),
+        float(f1.item()),
+        float(minority_f1.item()),
+        float(hd95),
+    )
