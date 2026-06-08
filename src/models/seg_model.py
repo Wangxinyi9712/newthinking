@@ -72,6 +72,12 @@ class UpBlock(nn.Module):
 
 
 class HybridUNet(nn.Module):
+    """
+    输出:
+      logits: segmentation logits
+      sdm: signed-distance-map regression head
+      feat: bottleneck+prototype feature (when return_features=True)
+    """
     def __init__(
         self,
         in_channels: int,
@@ -100,6 +106,7 @@ class HybridUNet(nn.Module):
         self.up1 = UpBlock(channels[1], channels[0], channels[0], dim)
 
         self.out = conv(channels[0], out_channels, 1)
+        self.sdm_head = conv(channels[0], 1, 1)
         self.proto_head = PrototypeProjectionHead(channels[3], proj_ch=min(64, channels[3]), dim=dim)
 
     def _merge_features(self, b: torch.Tensor) -> torch.Tensor:
@@ -116,12 +123,15 @@ class HybridUNet(nn.Module):
         d3 = self.up3(b, s3)
         d2 = self.up2(d3, s2)
         d1 = self.up1(d2, s1)
+
         logits = self.out(d1)
+        sdm = self.sdm_head(d1)
 
         if return_features:
             proto_feat = self.proto_head(b)
             if proto_feat.shape[2:] != b.shape[2:]:
                 mode = "trilinear" if b.ndim == 5 else "bilinear"
                 proto_feat = F.interpolate(proto_feat, size=b.shape[2:], mode=mode, align_corners=False)
-            return logits, torch.cat([b, proto_feat], dim=1)
-        return logits
+            feat = torch.cat([b, proto_feat], dim=1)
+            return logits, sdm, feat
+        return logits, sdm

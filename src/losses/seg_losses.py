@@ -88,6 +88,22 @@ def supervised_loss(logits: torch.Tensor, target: torch.Tensor):
     return _safe(ce + dice)
 
 
+def cps_loss(logits_a: torch.Tensor, logits_b: torch.Tensor, conf_mask: torch.Tensor | None = None):
+    pa = torch.sigmoid(logits_a.float()).detach()
+    pb = torch.sigmoid(logits_b.float()).detach()
+    ya = (pa > 0.5).float()
+    yb = (pb > 0.5).float()
+
+    la = F.binary_cross_entropy_with_logits(logits_a.float(), yb, reduction="none")
+    lb = F.binary_cross_entropy_with_logits(logits_b.float(), ya, reduction="none")
+    l = 0.5 * (la + lb)
+    if conf_mask is not None:
+        l = l * conf_mask.float()
+        den = conf_mask.float().sum().clamp_min(1.0)
+        return _safe(l.sum() / den)
+    return _safe(l.mean())
+
+
 def unsupervised_loss(student_logits: torch.Tensor, teacher_probs: torch.Tensor, tau: float = 0.65, fused_weight=None, soft_gate=None, cvar_ratio: float = 0.20):
     pseudo = teacher_probs.detach().float().clamp(0.0, 1.0)
     z = student_logits.float()
@@ -173,5 +189,29 @@ def structural_loss(logits: torch.Tensor, prior: torch.Tensor, hd_weight: float 
     return _safe(edge + hd_weight * hd + topo_weight * topo)
 
 
+def sdm_loss(pred_sdm: torch.Tensor, gt_mask: torch.Tensor):
+    y = gt_mask.float().clamp(0.0, 1.0)
+    if y.ndim == 5:
+        y_s = F.avg_pool3d(y, 5, 1, 2)
+    else:
+        y_s = F.avg_pool2d(y, 5, 1, 2)
+    target_sdm = (y_s - 0.5) * 2.0
+    return _safe(F.l1_loss(pred_sdm.float(), target_sdm))
+
+
 def feature_consistency_loss(student_feat: torch.Tensor, teacher_feat: torch.Tensor):
     return _safe(F.mse_loss(student_feat.float(), teacher_feat.detach().float()))
+
+
+# ===== Adversarial losses =====
+def gan_discriminator_loss(real_logits: torch.Tensor, fake_logits: torch.Tensor) -> torch.Tensor:
+    real_target = torch.ones_like(real_logits)
+    fake_target = torch.zeros_like(fake_logits)
+    l_real = F.binary_cross_entropy_with_logits(real_logits, real_target)
+    l_fake = F.binary_cross_entropy_with_logits(fake_logits, fake_target)
+    return _safe(0.5 * (l_real + l_fake))
+
+
+def gan_generator_loss(fake_logits: torch.Tensor) -> torch.Tensor:
+    target = torch.ones_like(fake_logits)
+    return _safe(F.binary_cross_entropy_with_logits(fake_logits, target))

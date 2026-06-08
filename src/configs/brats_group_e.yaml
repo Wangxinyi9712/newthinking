@@ -29,34 +29,33 @@ train:
   seed: [0, 1, 2]
 
 loss:
-  # core
   tau: 0.65
   lambda_ssl: 1.0
   lambda_minor: 0.8
   lambda_struct: 0.08
   lambda_feat_consistency: 0.0
+  lambda_cps: 0.4
+  lambda_sdm: 0.2
 
-  # adaptive pseudo-label + risk
   teacher_temperature: 1.5
   tau_quantile: 0.70
   soft_gate_power: 1.0
   cvar_ratio: 0.20
 
-  # feedback control (new)
-  ssl_feedback_gain: 0.15
-  ssl_min: 0.40
-  ssl_max: 1.40
-
-  # structural
   hd_weight: 0.25
   fg_weight: 2.0
   topo_weight: 0.08
 
-  # class imbalance
   focal_alpha: 0.25
   focal_gamma: 2.0
   auto_class_weights: false
   minor_class_weights: [2.0]
+
+  # adversarial branch
+  use_adversarial: true
+  lambda_adv: 0.05
+  lambda_d: 0.5
+  d_steps: 1
 
   reliability:
     enable_reliability: true

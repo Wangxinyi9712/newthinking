@@ -12,16 +12,21 @@ from tqdm import tqdm
 
 from losses.seg_losses import (
     adaptive_tau_from_quantile,
+    cps_loss,
     dynamic_pseudo_weight,
     feature_consistency_loss,
     fuse_pseudo_with_reliability,
+    gan_discriminator_loss,
+    gan_generator_loss,
     minority_sensitive_loss,
     reliability_components,
+    sdm_loss,
     structural_loss,
     supervised_loss,
     teacher_prob_with_temperature,
     unsupervised_loss,
 )
+from models.discriminator import SegDiscriminator
 from utils.metrics import compute_binary_metrics
 
 
@@ -45,6 +50,7 @@ class MeanTeacherTrainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.student = student.to(self.device)
+        self.student_aux = deepcopy(student).to(self.device)
         self.teacher = deepcopy(student).to(self.device)
         self.teacher.eval()
 
@@ -54,12 +60,37 @@ class MeanTeacherTrainer:
         self.reliability_mlp = torch.nn.Sequential(conv(9, 16, 1), torch.nn.GELU(), conv(16, 1, 1)).to(self.device)
         self.fusion_gate_mlp = torch.nn.Sequential(conv(2, 8, 1), torch.nn.GELU(), conv(8, 1, 1)).to(self.device)
 
-        params = list(self.student.parameters()) + list(self.reliability_mlp.parameters()) + list(self.fusion_gate_mlp.parameters())
-        self.optim = Adam(params, lr=float(cfg["train"]["lr"]))
+        # adversarial discriminator
+        self.use_adv = bool(cfg["loss"].get("use_adversarial", True))
+        self.lambda_adv = float(cfg["loss"].get("lambda_adv", 0.05))
+        self.lambda_d = float(cfg["loss"].get("lambda_d", 0.5))
+        self.d_steps = int(cfg["loss"].get("d_steps", 1))
+
+        if self.use_adv:
+            self.discriminator = SegDiscriminator(
+                in_channels=int(cfg["model"]["in_channels"]),
+                out_channels=int(cfg["model"]["out_channels"]),
+                base_ch=32,
+                dim=dim,
+            ).to(self.device)
+        else:
+            self.discriminator = None
+
+        g_params = (
+            list(self.student.parameters())
+            + list(self.student_aux.parameters())
+            + list(self.reliability_mlp.parameters())
+            + list(self.fusion_gate_mlp.parameters())
+        )
+        self.optim_g = Adam(g_params, lr=float(cfg["train"]["lr"]))
+
+        if self.use_adv:
+            self.optim_d = Adam(self.discriminator.parameters(), lr=float(cfg["train"]["lr"]) * 0.5)
+        else:
+            self.optim_d = None
+
         self.scheduler = CosineAnnealingLR(
-            self.optim,
-            T_max=int(cfg["train"]["epochs"]),
-            eta_min=float(cfg["train"].get("min_lr", 1e-6)),
+            self.optim_g, T_max=int(cfg["train"]["epochs"]), eta_min=float(cfg["train"].get("min_lr", 1e-6))
         )
 
         self.epochs = int(cfg["train"]["epochs"])
@@ -67,7 +98,8 @@ class MeanTeacherTrainer:
         self.ema_m = float(cfg["train"].get("ema_momentum", 0.99))
         self.use_amp = bool(cfg["train"].get("use_amp", True)) and self.device.type == "cuda"
         self.grad_accum_steps = max(1, int(cfg["train"].get("grad_accum_steps", 1)))
-        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.scaler_g = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+        self.scaler_d = torch.amp.GradScaler("cuda", enabled=self.use_amp)
 
         self.warmup_epochs = int(cfg["train"].get("warmup_epochs", 12))
         self.base_tau = float(cfg["loss"].get("tau", 0.65))
@@ -75,16 +107,13 @@ class MeanTeacherTrainer:
         self.lambda_minor = float(cfg["loss"].get("lambda_minor", 0.8))
         self.lambda_struct = float(cfg["loss"].get("lambda_struct", 0.08))
         self.lambda_feat = float(cfg["loss"].get("lambda_feat_consistency", 0.0))
+        self.lambda_cps = float(cfg["loss"].get("lambda_cps", 0.4))
+        self.lambda_sdm = float(cfg["loss"].get("lambda_sdm", 0.2))
 
         self.teacher_temp = float(cfg["loss"].get("teacher_temperature", 1.5))
         self.tau_quantile = float(cfg["loss"].get("tau_quantile", 0.70))
         self.soft_gate_power = float(cfg["loss"].get("soft_gate_power", 1.0))
         self.cvar_ratio = float(cfg["loss"].get("cvar_ratio", 0.20))
-
-        self.ssl_gain = float(cfg["loss"].get("ssl_feedback_gain", 0.15))
-        self.ssl_min = float(cfg["loss"].get("ssl_min", 0.4))
-        self.ssl_max = float(cfg["loss"].get("ssl_max", 1.4))
-        self._ssl_dynamic = 1.0
 
     def _curriculum(self, epoch: int):
         if epoch <= self.warmup_epochs:
@@ -98,9 +127,7 @@ class MeanTeacherTrainer:
         out.mkdir(parents=True, exist_ok=True)
 
         best_dice = -1.0
-        history_file = out / "history.csv"
-
-        with open(history_file, "w", newline="", encoding="utf-8") as f:
+        with open(out / "history.csv", "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(
                 [
@@ -115,32 +142,32 @@ class MeanTeacherTrainer:
                 self.scheduler.step()
 
                 m = self.evaluate(loaders["val"], use_teacher_ema=bool(self.cfg["inference"].get("use_teacher_ema", True)))
-                lr = self.optim.param_groups[0]["lr"]
-
-                gap = float(m.recall - m.precision)
-                self._ssl_dynamic = float(max(self.ssl_min, min(self.ssl_max, self._ssl_dynamic - self.ssl_gain * gap)))
-
+                lr = self.optim_g.param_groups[0]["lr"]
                 w.writerow([epoch, lr, tl, cm, rm, om, sm, m.dice, m.iou, m.precision, m.recall, m.f1, m.minority_f1, m.hd95])
 
                 if torch.isfinite(torch.tensor(m.dice)) and m.dice > best_dice:
                     best_dice = m.dice
-                    torch.save(
-                        {
-                            "student": self.student.state_dict(),
-                            "teacher": self.teacher.state_dict(),
-                            "reliability_mlp": self.reliability_mlp.state_dict(),
-                            "fusion_gate_mlp": self.fusion_gate_mlp.state_dict(),
-                        },
-                        out / "best.pt",
-                    )
+                    ckpt = {
+                        "student": self.student.state_dict(),
+                        "student_aux": self.student_aux.state_dict(),
+                        "teacher": self.teacher.state_dict(),
+                        "reliability_mlp": self.reliability_mlp.state_dict(),
+                        "fusion_gate_mlp": self.fusion_gate_mlp.state_dict(),
+                    }
+                    if self.use_adv:
+                        ckpt["discriminator"] = self.discriminator.state_dict()
+                    torch.save(ckpt, out / "best.pt")
 
     def _train_one_epoch(self, loaders: dict, epoch: int):
         self.student.train()
+        self.student_aux.train()
         self.reliability_mlp.train()
         self.fusion_gate_mlp.train()
+        if self.use_adv:
+            self.discriminator.train()
 
         ssl_factor, use_rel, use_cons, struct_lambda = self._curriculum(epoch)
-        ssl_lambda = self.lambda_ssl * ssl_factor * self._ssl_dynamic
+        ssl_lambda = self.lambda_ssl * ssl_factor
 
         rel_cfg = dict(self.cfg["loss"].get("reliability", {}))
         ab = self.cfg.get("ablation_switches", {})
@@ -156,7 +183,9 @@ class MeanTeacherTrainer:
         n_steps = 0
 
         class_weights = torch.tensor(self.cfg["loss"].get("minor_class_weights", [2.0]), device=self.device, dtype=torch.float32)
-        self.optim.zero_grad(set_to_none=True)
+        self.optim_g.zero_grad(set_to_none=True)
+        if self.use_adv:
+            self.optim_d.zero_grad(set_to_none=True)
 
         pbar = tqdm(loaders["labeled"], desc=f"train-{epoch}/{self.epochs}", leave=True, dynamic_ncols=True)
         for batch in pbar:
@@ -172,26 +201,23 @@ class MeanTeacherTrainer:
 
             amp_ctx = (lambda: torch.amp.autocast("cuda")) if self.use_amp else nullcontext
             with amp_ctx():
-                s_l = self.student(x_l)
-                l_sup = supervised_loss(s_l, y_l)
+                s_l_logits, s_l_sdm, s_l_feat = self.student(x_l, return_features=True)
+                s2_l_logits, s2_l_sdm, _ = self.student_aux(x_l, return_features=True)
+
+                l_sup = supervised_loss(s_l_logits, y_l)
+                l_sup_aux = supervised_loss(s2_l_logits, y_l)
+                l_sdm = sdm_loss(s_l_sdm, y_l) + sdm_loss(s2_l_sdm, y_l)
 
                 with torch.no_grad():
-                    t_out = self.teacher(x_u)
-                    t_logits = t_out[0] if isinstance(t_out, tuple) else t_out
+                    t_logits, t_sdm, t_feat = self.teacher(x_u, return_features=True)
                     t_u = teacher_prob_with_temperature(t_logits, self.teacher_temp).float()
 
-                s_out = self.student(x_u)
-                if isinstance(s_out, tuple):
-                    s_u, s_feat = s_out
-                else:
-                    s_u, s_feat = s_out, None
-
-                s_u_prob = torch.sigmoid(s_u.float()).clamp(0.0, 1.0)
+                s_u_logits, s_u_sdm, s_u_feat = self.student(x_u, return_features=True)
+                s2_u_logits, s2_u_sdm, s2_u_feat = self.student_aux(x_u, return_features=True)
+                s_u_prob = torch.sigmoid(s_u_logits.float()).clamp(0.0, 1.0)
 
                 tau_q = adaptive_tau_from_quantile(t_u, q=self.tau_quantile, min_tau=0.50, max_tau=0.90)
-                ent = -(t_u.clamp(1e-6, 1-1e-6) * torch.log(t_u.clamp(1e-6, 1-1e-6)) + (1-t_u).clamp(1e-6, 1-1e-6) * torch.log((1-t_u).clamp(1e-6, 1-1e-6)))
-                tau_ent = 0.5 + 0.5 * torch.exp(torch.tensor(-float(ent.mean().item()), device=t_u.device)).item()
-                tau = 0.5 * self.base_tau + 0.3 * tau_q + 0.2 * tau_ent
+                tau = 0.5 * self.base_tau + 0.5 * tau_q
 
                 rel_parts = reliability_components(
                     s_u_prob.detach(), t_u, x_u.float(),
@@ -209,60 +235,101 @@ class MeanTeacherTrainer:
                 ).float()
 
                 reliability = torch.sigmoid(self.reliability_mlp(stacked)).clamp(0.0, 1.0)
-                pseudo_w, _ = dynamic_pseudo_weight(t_u, tau=tau)
+                pseudo_w, conf_mask = dynamic_pseudo_weight(t_u, tau=tau)
 
-                fused = fuse_pseudo_with_reliability(
-                    pseudo_w, reliability,
-                    gate_mlp=self.fusion_gate_mlp if use_rel else None,
-                    mode=rel_cfg.get("fusion_mode", "convex"),
-                    alpha=float(rel_cfg.get("fusion_alpha", 0.75)),
-                ) if use_rel else pseudo_w
-
+                fused = (
+                    fuse_pseudo_with_reliability(
+                        pseudo_w, reliability,
+                        gate_mlp=self.fusion_gate_mlp if use_rel else None,
+                        mode=rel_cfg.get("fusion_mode", "convex"),
+                        alpha=float(rel_cfg.get("fusion_alpha", 0.75)),
+                    )
+                    if use_rel
+                    else pseudo_w
+                )
                 soft_gate = reliability.pow(self.soft_gate_power)
 
-                l_unsup = unsupervised_loss(
-                    s_u.float(), t_u, tau=tau, fused_weight=fused, soft_gate=soft_gate, cvar_ratio=self.cvar_ratio
-                )
+                l_unsup = unsupervised_loss(s_u_logits.float(), t_u, tau=tau, fused_weight=fused, soft_gate=soft_gate, cvar_ratio=self.cvar_ratio)
+                l_unsup_aux = unsupervised_loss(s2_u_logits.float(), t_u, tau=tau, fused_weight=fused, soft_gate=soft_gate, cvar_ratio=self.cvar_ratio)
+                l_cps = cps_loss(s_u_logits.float(), s2_u_logits.float(), conf_mask=conf_mask)
 
                 l_minor = minority_sensitive_loss(
-                    s_l.float(), y_l.float(), class_weights,
+                    s_l_logits.float(), y_l.float(), class_weights,
                     focal_alpha=float(self.cfg["loss"].get("focal_alpha", 0.25)),
                     focal_gamma=float(self.cfg["loss"].get("focal_gamma", 2.0)),
                 )
+                l_struct = (
+                    structural_loss(
+                        s_l_logits.float(), y_l.float(),
+                        hd_weight=float(self.cfg["loss"].get("hd_weight", 0.25)),
+                        fg_weight=float(self.cfg["loss"].get("fg_weight", 2.0)),
+                        topo_weight=float(self.cfg["loss"].get("topo_weight", 0.08)),
+                        smooth_edge=True,
+                    )
+                    if struct_lambda > 0 else torch.zeros((), device=self.device)
+                )
+                l_feat = feature_consistency_loss(s_u_feat.float(), t_feat.float()) if use_cons else torch.zeros((), device=self.device)
 
-                l_struct = structural_loss(
-                    s_l.float(), y_l.float(),
-                    hd_weight=float(self.cfg["loss"].get("hd_weight", 0.25)),
-                    fg_weight=float(self.cfg["loss"].get("fg_weight", 2.0)),
-                    topo_weight=float(self.cfg["loss"].get("topo_weight", 0.08)),
-                    smooth_edge=True,
-                ) if struct_lambda > 0 else torch.zeros((), device=self.device)
+                # generator adversarial loss
+                l_adv_g = torch.zeros((), device=self.device)
+                if self.use_adv:
+                    p_fake = torch.sigmoid(s_u_logits.float())
+                    d_fake = self.discriminator(x_u.float(), p_fake)
+                    l_adv_g = gan_generator_loss(d_fake)
 
-                l_feat = feature_consistency_loss(s_feat.float(), s_feat.detach().float()) if (use_cons and s_feat is not None) else torch.zeros((), device=self.device)
+                g_loss = (
+                    l_sup + l_sup_aux
+                    + ssl_lambda * (l_unsup + l_unsup_aux)
+                    + self.lambda_cps * l_cps
+                    + self.lambda_minor * l_minor
+                    + struct_lambda * l_struct
+                    + self.lambda_feat * l_feat
+                    + self.lambda_sdm * l_sdm
+                    + self.lambda_adv * l_adv_g
+                ) / self.grad_accum_steps
 
-                loss = l_sup + ssl_lambda * l_unsup + self.lambda_minor * l_minor + struct_lambda * l_struct + self.lambda_feat * l_feat
-                loss = loss / self.grad_accum_steps
-
-            if not _is_finite(loss):
-                self.optim.zero_grad(set_to_none=True)
+            if not _is_finite(g_loss):
+                self.optim_g.zero_grad(set_to_none=True)
+                if self.use_adv:
+                    self.optim_d.zero_grad(set_to_none=True)
                 n_steps += 1
                 continue
 
-            self.scaler.scale(loss).backward()
+            # step G
+            self.scaler_g.scale(g_loss).backward()
 
             if (n_steps + 1) % self.grad_accum_steps == 0:
-                if self.grad_clip > 0:
-                    self.scaler.unscale_(self.optim)
-                    torch.nn.utils.clip_grad_norm_(
-                        list(self.student.parameters()) + list(self.reliability_mlp.parameters()) + list(self.fusion_gate_mlp.parameters()),
-                        self.grad_clip,
-                    )
-                self.scaler.step(self.optim)
-                self.scaler.update()
-                self.optim.zero_grad(set_to_none=True)
+                self.scaler_g.unscale_(self.optim_g)
+                torch.nn.utils.clip_grad_norm_(
+                    list(self.student.parameters()) + list(self.student_aux.parameters())
+                    + list(self.reliability_mlp.parameters()) + list(self.fusion_gate_mlp.parameters()),
+                    self.grad_clip,
+                )
+                self.scaler_g.step(self.optim_g)
+                self.scaler_g.update()
+                self.optim_g.zero_grad(set_to_none=True)
+
                 update_ema(self.student, self.teacher, self.ema_m)
 
-            running += _safe_scalar(loss * self.grad_accum_steps)
+                # step D
+                if self.use_adv:
+                    for _ in range(self.d_steps):
+                        with amp_ctx():
+                            with torch.no_grad():
+                                p_fake = torch.sigmoid(self.student(x_u)[0].float())
+                            p_real = y_l.float()
+                            d_real = self.discriminator(x_l.float(), p_real)
+                            d_fake = self.discriminator(x_u.float(), p_fake.detach())
+                            d_loss = self.lambda_d * gan_discriminator_loss(d_real, d_fake)
+
+                        self.scaler_d.scale(d_loss).backward()
+                        self.scaler_d.unscale_(self.optim_d)
+                        torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), self.grad_clip)
+                        self.scaler_d.step(self.optim_d)
+                        self.scaler_d.update()
+                        self.optim_d.zero_grad(set_to_none=True)
+
+            running += _safe_scalar(g_loss * self.grad_accum_steps)
             conf_running += _safe_scalar(pseudo_w.mean())
             rel_running += _safe_scalar(reliability.mean())
             ood_running += _safe_scalar(rel_parts["ood_map"].mean())
@@ -286,9 +353,14 @@ class MeanTeacherTrainer:
 
             with (torch.amp.autocast("cuda") if self.use_amp else nullcontext()):
                 if use_ensemble:
-                    logits = 0.5 * self.student(x) + 0.5 * self.teacher(x)
+                    z1, _ = self.student(x)
+                    z2, _ = self.teacher(x)
+                    logits = 0.5 * z1 + 0.5 * z2
                 else:
-                    logits = self.teacher(x) if use_teacher_ema else self.student(x)
+                    if use_teacher_ema:
+                        logits, _ = self.teacher(x)
+                    else:
+                        logits, _ = self.student(x)
 
             m = compute_binary_metrics(logits.float(), y.float(), threshold=float(self.cfg["inference"].get("threshold", 0.40)))
             agg["dice"] += max(0.0, min(1.0, float(m.dice)))
@@ -303,4 +375,7 @@ class MeanTeacherTrainer:
 
         from utils.metrics import SegMetrics
         d = max(1, n)
-        return SegMetrics(agg["dice"]/d, agg["iou"]/d, agg["precision"]/d, agg["recall"]/d, agg["f1"]/d, agg["minority_f1"]/d, agg["hd95"]/d)
+        return SegMetrics(
+            agg["dice"] / d, agg["iou"] / d, agg["precision"] / d,
+            agg["recall"] / d, agg["f1"] / d, agg["minority_f1"] / d, agg["hd95"] / d
+        )
