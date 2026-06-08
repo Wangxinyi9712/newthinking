@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -o slurm_out_new_1.log
-#SBATCH -e slurm_err_new_1.log
-#SBATCH --partition=gpu-a10
+#SBATCH -o slurm_out_new.log
+#SBATCH -e slurm_err_new.log
+#SBATCH --partition=gpu-l20
 #SBATCH --qos=normal
 #SBATCH -J newthinking
 #SBATCH --nodes=1

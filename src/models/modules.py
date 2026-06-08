@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def _conv(dim: int):
@@ -34,8 +35,7 @@ class SpatialAttention(nn.Module):
     def __init__(self, dim: int = 3, kernel_size: int = 7):
         super().__init__()
         conv = _conv(dim)
-        pad = kernel_size // 2
-        self.conv = conv(2, 1, kernel_size, padding=pad)
+        self.conv = conv(2, 1, kernel_size, padding=kernel_size // 2)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         avg = x.mean(dim=1, keepdim=True)
@@ -79,3 +79,53 @@ class LiteTransformerEncoder(nn.Module):
         tokens = tokens + y
         tokens = tokens + self.mlp(self.norm2(tokens))
         return tokens.transpose(1, 2).view(b, c, *spatial)
+
+
+class UncertaintyGate(nn.Module):
+    def __init__(self, channels: int, dim: int = 3):
+        super().__init__()
+        conv = _conv(dim)
+        hidden = max(4, channels // 8)
+        self.net = nn.Sequential(conv(1, hidden, 1), nn.GELU(), conv(hidden, 1, 1), nn.Sigmoid())
+
+    def forward(self, skip: torch.Tensor) -> torch.Tensor:
+        unc = skip.var(dim=1, keepdim=True, unbiased=False)
+        gate = self.net(unc)
+        return skip * (1.0 - gate)
+
+
+class FrequencyEnhance(nn.Module):
+    def __init__(self, channels: int, dim: int = 3, alpha: float = 0.12):
+        super().__init__()
+        self.dim = dim
+        self.alpha = alpha
+        conv = _conv(dim)
+        self.proj = conv(channels, channels, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_dtype = x.dtype
+        xf = x.float()
+        spatial_dims = tuple(range(2, xf.ndim))
+        freq = torch.fft.fftn(xf, dim=spatial_dims)
+        amp = torch.abs(freq)
+
+        if self.dim == 3:
+            low = F.avg_pool3d(amp, 3, 1, 1)
+        else:
+            low = F.avg_pool2d(amp, 3, 1, 1)
+
+        low = low / (low.amax(dim=spatial_dims, keepdim=True) + 1e-6)
+        low = self.proj(low)
+        out = xf + self.alpha * low
+        return out.to(dtype=x_dtype)
+
+
+class PrototypeProjectionHead(nn.Module):
+    def __init__(self, in_ch: int, proj_ch: int = 64, dim: int = 3):
+        super().__init__()
+        conv = _conv(dim)
+        self.net = nn.Sequential(conv(in_ch, in_ch, 1), nn.GELU(), conv(in_ch, proj_ch, 1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        z = self.net(x.float())
+        return F.normalize(z, p=2, dim=1)
