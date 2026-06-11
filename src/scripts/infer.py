@@ -4,6 +4,13 @@ import argparse
 from pathlib import Path
 
 import torch
+import sys
+
+# ------------------------------
+# 确保可以导入 data 和 engine 模块
+ROOT = Path(__file__).resolve().parents[1]  # 指向 src
+sys.path.insert(0, str(ROOT))
+# ------------------------------
 
 from data.datasets import build_dataloaders
 from engine.trainer import MeanTeacherTrainer
