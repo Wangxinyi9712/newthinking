@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import warnings
+from dataclasses import is_dataclass, asdict
 from pathlib import Path
 import sys
 
@@ -26,6 +27,8 @@ warnings.filterwarnings(
 
 def _to_plain_dict(cfg):
     """将可能的 OmegaConf/其他配置对象转为原生 dict，便于 json dump。"""
+    if is_dataclass(cfg):
+        cfg = asdict(cfg)
     if isinstance(cfg, dict):
         return {k: _to_plain_dict(v) for k, v in cfg.items()}
     if isinstance(cfg, (list, tuple)):
@@ -64,8 +67,13 @@ def main():
     if args.seed is not None:
         seed = int(args.seed)
     else:
-        seeds = cfg.train.get("seed", [0])
-        seed = int(seeds[0] if isinstance(seeds, list) and len(seeds) > 0 else 0)
+        train_cfg = cfg.train
+        seeds = train_cfg.get("seed", [0])
+
+        if isinstance(seeds, list):
+            seed = int(seeds[0])
+        else:
+            seed = int(seeds)
 
     set_seed(seed)
 

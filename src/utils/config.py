@@ -16,6 +16,13 @@ class Config:
     inference: dict[str, Any]
     log: dict[str, Any]
 
+    # 添加下标访问支持
+    def __getitem__(self, key):
+        return getattr(self, key)
+
+    # 添加 get 支持
+    def get(self, key, default=None):
+        return getattr(self, key, default)
 
 def load_config(path: str | Path) -> Config:
     with open(path, "r", encoding="utf-8") as f:
