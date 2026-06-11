@@ -393,3 +393,4 @@ class MeanTeacherTrainer:
             agg["dice"] / d, agg["iou"] / d, agg["precision"] / d,
             agg["recall"] / d, agg["f1"] / d, agg["minority_f1"] / d, agg["hd95"] / d
         )
+    

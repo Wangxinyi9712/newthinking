@@ -72,12 +72,17 @@ def run_inference(model: torch.nn.Module, loader, out_dir: str) -> None:
     with torch.no_grad():
         for i, batch in enumerate(loader):
             x = batch["image"].to(device)
-            logits = model(x)
+            # 安全解包
+            out = model(x)
+            logits = out[0] if isinstance(out, tuple) else out
             probs = torch.sigmoid(logits)
             pred = (probs > 0.5).float().cpu()
 
             noisy_x = x + 0.03 * torch.randn_like(x)
-            noisy_probs = torch.sigmoid(model(noisy_x))
+            out_noisy = model(noisy_x)
+            noisy_logits = out_noisy[0] if isinstance(out_noisy, tuple) else out_noisy
+            noisy_probs = torch.sigmoid(noisy_logits)
+
             parts = reliability_components(noisy_probs, probs, x, enable_ood=True)
             reliability = (0.35 * parts["confidence_map"] + 0.25 * parts["entropy_map"] + 0.25 * parts["consistency_map"] + 0.15 * parts["ood_map"]).clamp(0, 1)
 
