@@ -67,7 +67,6 @@ python method/run_method_suite.py \
   --base-config src/configs/brats_group_e.yaml \
   --suite src/configs/method_suite.yaml
 
-# 如需直接跑所有方法 + 全seed，取消下面注释
 python method/run_method_suite.py \
  --base-config src/configs/brats_group_e.yaml \
  --suite src/configs/method_suite.yaml \
