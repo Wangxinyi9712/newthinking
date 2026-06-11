@@ -60,7 +60,6 @@ class MeanTeacherTrainer:
         self.reliability_mlp = torch.nn.Sequential(conv(9, 16, 1), torch.nn.GELU(), conv(16, 1, 1)).to(self.device)
         self.fusion_gate_mlp = torch.nn.Sequential(conv(2, 8, 1), torch.nn.GELU(), conv(8, 1, 1)).to(self.device)
 
-        # adversarial discriminator
         self.use_adv = bool(cfg["loss"].get("use_adversarial", True))
         self.lambda_adv = float(cfg["loss"].get("lambda_adv", 0.05))
         self.lambda_d = float(cfg["loss"].get("lambda_d", 0.5))
@@ -122,12 +121,27 @@ class MeanTeacherTrainer:
             return 1.0, True, True, 0.0
         return 1.0, True, True, self.lambda_struct
 
+    def _build_ckpt_dict(self) -> dict:
+        ckpt = {
+            "student": self.student.state_dict(),
+            "student_aux": self.student_aux.state_dict(),
+            "teacher": self.teacher.state_dict(),
+            "reliability_mlp": self.reliability_mlp.state_dict(),
+            "fusion_gate_mlp": self.fusion_gate_mlp.state_dict(),
+        }
+        if self.use_adv and self.discriminator is not None:
+            ckpt["discriminator"] = self.discriminator.state_dict()
+        return ckpt
+
     def fit(self, loaders: dict, out_dir: str) -> None:
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
 
         best_dice = -1.0
-        with open(out / "history.csv", "w", newline="", encoding="utf-8") as f:
+        best_epoch = -1
+        history_path = out / "history.csv"
+
+        with open(history_path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(
                 [
@@ -143,20 +157,23 @@ class MeanTeacherTrainer:
 
                 m = self.evaluate(loaders["val"], use_teacher_ema=bool(self.cfg["inference"].get("use_teacher_ema", True)))
                 lr = self.optim_g.param_groups[0]["lr"]
+
                 w.writerow([epoch, lr, tl, cm, rm, om, sm, m.dice, m.iou, m.precision, m.recall, m.f1, m.minority_f1, m.hd95])
 
                 if torch.isfinite(torch.tensor(m.dice)) and m.dice > best_dice:
-                    best_dice = m.dice
-                    ckpt = {
-                        "student": self.student.state_dict(),
-                        "student_aux": self.student_aux.state_dict(),
-                        "teacher": self.teacher.state_dict(),
-                        "reliability_mlp": self.reliability_mlp.state_dict(),
-                        "fusion_gate_mlp": self.fusion_gate_mlp.state_dict(),
-                    }
-                    if self.use_adv:
-                        ckpt["discriminator"] = self.discriminator.state_dict()
-                    torch.save(ckpt, out / "best.pt")
+                    best_dice = float(m.dice)
+                    best_epoch = epoch
+                    torch.save(self._build_ckpt_dict(), out / "best.pt")
+
+        # 始终保存最后一轮模型
+        torch.save(self._build_ckpt_dict(), out / "last.pt")
+
+        # 可选：记录摘要
+        with open(out / "checkpoint_summary.txt", "w", encoding="utf-8") as fp:
+            fp.write(f"best_epoch: {best_epoch}\n")
+            fp.write(f"best_dice: {best_dice:.6f}\n")
+            fp.write("best_ckpt: best.pt\n")
+            fp.write("last_ckpt: last.pt\n")
 
     def _train_one_epoch(self, loaders: dict, epoch: int):
         self.student.train()
@@ -270,7 +287,6 @@ class MeanTeacherTrainer:
                 )
                 l_feat = feature_consistency_loss(s_u_feat.float(), t_feat.float()) if use_cons else torch.zeros((), device=self.device)
 
-                # generator adversarial loss
                 l_adv_g = torch.zeros((), device=self.device)
                 if self.use_adv:
                     p_fake = torch.sigmoid(s_u_logits.float())
@@ -295,7 +311,6 @@ class MeanTeacherTrainer:
                 n_steps += 1
                 continue
 
-            # step G
             self.scaler_g.scale(g_loss).backward()
 
             if (n_steps + 1) % self.grad_accum_steps == 0:
@@ -311,7 +326,6 @@ class MeanTeacherTrainer:
 
                 update_ema(self.student, self.teacher, self.ema_m)
 
-                # step D
                 if self.use_adv:
                     for _ in range(self.d_steps):
                         with amp_ctx():

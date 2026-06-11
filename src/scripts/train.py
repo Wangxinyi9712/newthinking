@@ -1,20 +1,9 @@
 from __future__ import annotations
 
-import os
-
-if not os.environ.get("OMP_NUM_THREADS", "").isdigit():
-    os.environ["OMP_NUM_THREADS"] = "1"
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-
 import argparse
-import csv
 import json
-import statistics
-import sys
+import warnings
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(ROOT))
 
 from data.datasets import build_dataloaders
 from engine.trainer import MeanTeacherTrainer
@@ -23,78 +12,83 @@ from utils.config import load_config
 from utils.seed import set_seed
 
 
-def build_model(cfg: dict) -> HybridUNet:
-    return HybridUNet(
-        in_channels=cfg["model"]["in_channels"],
-        out_channels=cfg["model"]["out_channels"],
-        channels=tuple(cfg["model"].get("channels", [32, 64, 128, 256])),
-        dim=3 if cfg["data"].get("dim", "3d") == "3d" else 2,
-        use_transformer=cfg["model"].get("use_transformer", True),
+warnings.filterwarnings(
+    "ignore",
+    message="single channel prediction, `include_background=False` ignored.",
+)
+
+
+def _to_plain_dict(cfg):
+    """将可能的 OmegaConf/其他配置对象转为原生 dict，便于 json dump。"""
+    if isinstance(cfg, dict):
+        return {k: _to_plain_dict(v) for k, v in cfg.items()}
+    if isinstance(cfg, (list, tuple)):
+        return [_to_plain_dict(v) for v in cfg]
+    return cfg
+
+
+def _build_model(cfg: dict) -> HybridUNet:
+    dim = 3 if cfg["data"].get("dim", "3d") == "3d" else 2
+    model = HybridUNet(
+        in_channels=int(cfg["model"]["in_channels"]),
+        out_channels=int(cfg["model"]["out_channels"]),
+        channels=tuple(cfg["model"]["channels"]),
+        dim=dim,
+        use_transformer=bool(cfg["model"].get("use_transformer", True)),
     )
+    return model
 
 
-def main() -> None:
+def _save_config_used(cfg: dict, run_dir: Path) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with open(run_dir / "config_used.json", "w", encoding="utf-8") as f:
+        json.dump(_to_plain_dict(cfg), f, ensure_ascii=False, indent=2)
+
+
+def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True)
+    parser.add_argument("--config", type=str, required=True, help="Path to yaml config")
+    parser.add_argument("--seed", type=int, default=None, help="Override seed in config")
+    parser.add_argument("--run-name", type=str, default="", help="Optional suffix for output dir")
     args = parser.parse_args()
 
-    cfg_obj = load_config(args.config)
-    cfg = {
-        "data": cfg_obj.data,
-        "model": cfg_obj.model,
-        "train": cfg_obj.train,
-        "loss": cfg_obj.loss,
-        "inference": cfg_obj.inference,
-        "log": cfg_obj.log,
-    }
+    cfg = load_config(args.config)
 
-    # 关键调试输出：确认到底加载了哪份配置
-    print(f"[DEBUG] config_path={args.config}")
-    print(f"[DEBUG] data_cfg={cfg['data']}")
+    # 读取seed策略：优先CLI，其次config中的第一个seed，最后0
+    if args.seed is not None:
+        seed = int(args.seed)
+    else:
+        seeds = cfg.get("train", {}).get("seed", [0])
+        seed = int(seeds[0] if isinstance(seeds, list) and len(seeds) > 0 else 0)
 
-    seeds = cfg["train"].get("seed", [0])
-    if not isinstance(seeds, list):
-        seeds = [seeds]
+    set_seed(seed)
 
-    out_dir = Path(cfg["log"]["out_dir"])
-    out_dir.mkdir(parents=True, exist_ok=True)
-    repeats = []
+    # 输出目录：log.out_dir/seed_{seed}
+    base_out = Path(cfg["log"]["out_dir"])
+    if args.run_name:
+        base_out = base_out.parent / f"{base_out.name}_{args.run_name}"
+    run_dir = base_out / f"seed_{seed}"
+    run_dir.mkdir(parents=True, exist_ok=True)
 
-    for seed in seeds:
-        set_seed(int(seed))
-        run_dir = out_dir / f"seed_{seed}"
-        run_cfg = {**cfg, "log": {**cfg["log"], "out_dir": str(run_dir)}}
+    # 保存实际配置
+    _save_config_used(cfg, run_dir)
 
-        loaders = build_dataloaders(run_cfg["data"])
-        model = build_model(run_cfg)
-        trainer = MeanTeacherTrainer(model, run_cfg)
-        trainer.fit(loaders, str(run_dir))
-        m = trainer.evaluate(
-            loaders["val"],
-            use_teacher_ema=bool(cfg["inference"].get("use_teacher_ema", False)),
-        )
-        repeats.append({"seed": seed, **m.__dict__})
+    # 构建数据
+    loaders = build_dataloaders(cfg["data"])
 
-        with open(run_dir / "config_used.json", "w", encoding="utf-8") as f:
-            json.dump(run_cfg, f, indent=2)
+    # 构建模型与trainer
+    model = _build_model(cfg)
+    trainer = MeanTeacherTrainer(model, cfg)
 
-    rep_file = out_dir / "repeats_summary.csv"
-    with open(rep_file, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=["seed", "dice", "iou", "precision", "recall", "f1", "minority_f1", "hd95"],
-        )
-        writer.writeheader()
-        writer.writerows(repeats)
+    print(f"[Train] config={args.config}")
+    print(f"[Train] seed={seed}")
+    print(f"[Train] run_dir={run_dir}")
 
-    agg = {}
-    for k in ["dice", "iou", "precision", "recall", "f1", "minority_f1", "hd95"]:
-        vals = [r[k] for r in repeats]
-        agg[f"{k}_mean"] = statistics.mean(vals)
-        agg[f"{k}_std"] = statistics.pstdev(vals) if len(vals) > 1 else 0.0
+    # 开始训练（trainer内部会保存best.pt与last.pt）
+    trainer.fit(loaders, str(run_dir))
 
-    with open(out_dir / "repeats_aggregate.json", "w", encoding="utf-8") as f:
-        json.dump(agg, f, indent=2)
+    print("[Train] Done.")
+    print(f"[Train] Checkpoints: {run_dir / 'best.pt'} , {run_dir / 'last.pt'}")
 
 
 if __name__ == "__main__":
