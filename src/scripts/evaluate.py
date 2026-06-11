@@ -5,8 +5,11 @@ import json
 from pathlib import Path
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+# ------------------------------
+# 确保可以导入 data 和 engine 模块
+ROOT = Path(__file__).resolve().parents[1]  # 指向 src
 sys.path.insert(0, str(ROOT))
+# ------------------------------
 
 import torch
 
@@ -33,19 +36,19 @@ def _resolve_ckpt(ckpt_arg: str, config_path: str, split: str = "seed_0") -> Pat
         raise ValueError(f"Unsupported --ckpt value: {ckpt_arg}. Use path/*.pt or alias best|last.")
 
     cfg = load_config(config_path)
-    out_dir = Path(cfg["log"]["out_dir"]) / split
+    out_dir = Path(cfg.log["out_dir"]) / split
     return out_dir / f"{alias}.pt"
 
 
 def _load_model_from_ckpt(cfg: dict, ckpt_path: Path, source: str):
-    dim = 3 if cfg["data"].get("dim", "3d") == "3d" else 2
+    dim = 3 if cfg.data.get("dim", "3d") == "3d" else 2
 
     model = HybridUNet(
-        in_channels=int(cfg["model"]["in_channels"]),
-        out_channels=int(cfg["model"]["out_channels"]),
-        channels=tuple(cfg["model"]["channels"]),
+        in_channels=int(cfg.model["in_channels"]),
+        out_channels=int(cfg.model["out_channels"]),
+        channels=tuple(cfg.model["channels"]),
         dim=dim,
-        use_transformer=bool(cfg["model"].get("use_transformer", True)),
+        use_transformer=bool(cfg.model.get("use_transformer", True)),
     )
 
     ckpt = torch.load(str(ckpt_path), map_location="cpu")
@@ -99,7 +102,7 @@ def main():
 
     model, _ = _load_model_from_ckpt(cfg, ckpt_path, source=args.source)
 
-    loaders = build_dataloaders(cfg)
+    loaders = build_dataloaders(cfg.data)
     trainer = MeanTeacherTrainer(model, cfg)
 
     # 若source是teacher，尝试恢复teacher权重

@@ -6,15 +6,17 @@ import warnings
 from pathlib import Path
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
+# ------------------------------
+# 确保可以导入 data 和 engine 模块
+ROOT = Path(__file__).resolve().parents[1]  # 指向 src
 sys.path.insert(0, str(ROOT))
+# ------------------------------
 
 from data.datasets import build_dataloaders
 from engine.trainer import MeanTeacherTrainer
 from models.seg_model import HybridUNet
 from utils.config import load_config
 from utils.seed import set_seed
-
 
 warnings.filterwarnings(
     "ignore",
@@ -62,13 +64,13 @@ def main():
     if args.seed is not None:
         seed = int(args.seed)
     else:
-        seeds = cfg.get("train", {}).get("seed", [0])
+        seeds = cfg.train.get("seed", [0])
         seed = int(seeds[0] if isinstance(seeds, list) and len(seeds) > 0 else 0)
 
     set_seed(seed)
 
     # 输出目录：log.out_dir/seed_{seed}
-    base_out = Path(cfg["log"]["out_dir"])
+    base_out = Path(cfg.log["out_dir"])
     if args.run_name:
         base_out = base_out.parent / f"{base_out.name}_{args.run_name}"
     run_dir = base_out / f"seed_{seed}"
@@ -78,7 +80,7 @@ def main():
     _save_config_used(cfg, run_dir)
 
     # 构建数据
-    loaders = build_dataloaders(cfg["data"])
+    loaders = build_dataloaders(cfg.data)
 
     # 构建模型与trainer
     model = _build_model(cfg)
@@ -97,4 +99,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
