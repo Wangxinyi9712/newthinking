@@ -33,6 +33,7 @@ src/
     brats_group_r2.yaml
     brats_group_r3.yaml
     brats_group_r4.yaml
+    method_suite.yaml
   data/
     datasets.py
     examples.py
@@ -57,6 +58,9 @@ src/
     config.py
     metrics.py
     seed.py
+method/
+  run_method_suite.py              
+  summarize_method_suite.py        
 ```
 
 ---
@@ -101,10 +105,10 @@ python src/scripts/build_splits.py --dataset msd_liver --root data/MSD_Liver --o
 
 ## 4. 训练 / 评估 / 推理
 
-### 4.1 单组训练（自动按 `seed: [0,1,2]` 重复）
+### 4.1 单组训练（按 seed 运行）
 
 ```bash
-python src/scripts/train.py --config src/configs/brats_group_e.yaml
+python src/scripts/train.py --config src/configs/brats_group_e.yaml --seed 0
 ```
 
 输出目录示例：
@@ -114,14 +118,24 @@ runs/brats_group_e/
   seed_0/
     history.csv
     best.pt
+    last.pt
+    checkpoint_summary.txt
     config_used.json
   seed_1/...
   seed_2/...
-  repeats_summary.csv
-  repeats_aggregate.json
 ```
 
-### 4.2 评估
+### 4.2 评估（支持 best|last 别名）
+
+```bash
+python src/scripts/evaluate.py \
+  --config src/configs/brats_group_e.yaml \
+  --ckpt best \
+  --split seed_0 \
+  --source teacher
+```
+
+或指定绝对路径：
 
 ```bash
 python src/scripts/evaluate.py \
@@ -132,14 +146,15 @@ python src/scripts/evaluate.py \
 
 `--source` 可选：`teacher | student | ensemble`
 
-### 4.3 推理可视化
+### 4.3 推理（支持 best|last 别名）
 
 ```bash
 python src/scripts/infer.py \
   --config src/configs/brats_group_e.yaml \
-  --ckpt runs/brats_group_e/seed_0/best.pt \
-  --out runs/brats_group_e/infer_seed0 \
-  --source teacher
+  --ckpt last \
+  --split seed_0 \
+  --source teacher \
+  --out runs/brats_group_e/infer_last_seed0
 ```
 
 ---
@@ -169,83 +184,81 @@ python src/scripts/analyze_stats.py \
 
 ---
 
-## 6. 实验设计（与代码对齐）
+## 6. Method 对比实验（论文表格 Method 列）
 
-### 6.1 数据与预处理（BraTS 3D）
+本项目已支持将 Method 列设置为可复现实验协议（位于 `src/configs/method_suite.yaml`），并自动生成各方法配置、训练、汇总。
 
-- 体素尺寸与 patch 统一：`96×96×96`（稳定训练，后续可升 112/128）
-- 归一化：`NormalizeIntensityd`
-- 增强：
-  - `RandSpatialCropd`
-  - `RandFlipd`
-  - `RandAffined`
-  - 无标注分支额外 `RandScaleIntensityd` + `RandGaussianNoised`
-- 数据加载：`batch_size=1, num_workers=0, pin_memory=false`
-- AMP + 梯度累积：`use_amp=true, grad_accum_steps=2`
+### 6.1 协议位置
+
+- `src/configs/method_suite.yaml`
+
+### 6.2 生成各方法配置
+
+```bash
+python method/run_method_suite.py \
+  --base-config src/configs/brats_group_e.yaml
+```
+
+生成目录：
+
+```text
+method/generated/
+  supervised.yaml
+  self_training.yaml
+  gan_ssl.yaml
+  mean_teacher.yaml
+  mt_reliability.yaml
+  ours.yaml
+```
+
+### 6.3 一键运行 method suite
+
+```bash
+python method/run_method_suite.py \
+  --base-config src/configs/brats_group_e.yaml \
+  --run
+```
+
+输出目录：
+
+```text
+runs/method_suite/<method_name>/seed_0|1|2/...
+```
+
+### 6.4 汇总 method 对比结果
+
+```bash
+python method/summarize_method_suite.py
+```
+
+输出：
+
+- `method/method_comparison.csv`
 
 ---
 
-## 7. 分组实验设置（BraTS）
+## 7. 实验设计（与代码对齐，BraTS 3D）
 
-> 统一资源设置（公平比较）：
->
-> - `spatial_size=[96,96,96]`
-> - `batch_size=1`
-> - `num_workers=0`
-> - `pin_memory=false`
-> - `cache_rate=0.1`
-> - `use_amp=true`
-> - `grad_accum_steps=2`
-> - `seed=[0,1,2]`
+### 7.1 统一资源设置（公平比较）
 
-### Group A（全监督基线）
-- 模型：U-Net（无 Transformer）
-- 半监督：关闭（`lambda_ssl=0.0`）
-- 少数类：关闭
-- 结构先验：关闭
-- 可靠性：关闭
+- `spatial_size=[96,96,96]`
+- `batch_size=1`
+- `num_workers=0`
+- `pin_memory=false`
+- `cache_rate=0.1`
+- `use_amp=true`
+- `grad_accum_steps=2`
+- `seed=[0,1,2]`
 
-### Group B（基础半监督 + 固定伪标签阈值）
-- A + `lambda_ssl=1.0`
-- `tau=0.95`（更严格伪标签）
-- 少数类 / 结构 / 可靠性：关闭
+### 7.2 Group E（当前完整模型）
 
-### Group C（半监督 + 动态权重）
-- B 但 `tau=0.7`（动态伪标签更积极）
-- 少数类 / 结构 / 可靠性：关闭
-
-### Group D（C + 少数类敏感）
-- C + `lambda_minor=1.0`
-- 开启少数类相关权重（`minor_class_weights=[2.0]`）
-- 结构先验：关闭
-- 可靠性：关闭
-
-### Group E（完整模型）
-- D + 结构先验（`lambda_struct=0.2`）
-- + 特征一致性（`lambda_feat_consistency=0.1`）
-- + 可靠性融合（confidence/entropy/consistency/ood）
-- + 多尺度注意力 + Transformer 编码器
-- + 少数类过采样
-
-### R1（去除 OOD）
-- 与 E 相同，`ood=false`
-- 验证 OOD 组件贡献
-
-### R2（去除少数类增强）
-- 与 E 相同，但：
-  - `minority_score=false`
-  - `minority_oversample=false`
-  - `lambda_minor=0.0`
-- 验证少数类模块贡献
-
-### R3（去除 consistency）
-- 与 E 相同，但 `consistency=false`、`lambda_feat_consistency=0.0`
-- 验证一致性分支贡献
-
-### R4（仅 reliability 主体）
-- 仅保留可靠性融合
-- 关闭 minority / ood / consistency / struct / feat-consistency
-- 验证 reliability 主干能力
+- Mean Teacher + EMA teacher
+- Reliability fusion（confidence/entropy/consistency/ood）
+- CPS（双学生交叉伪监督）
+- 少数类敏感损失 + 过采样
+- 结构先验（边界+拓扑+HD）
+- SDM 形状分支
+- 可选 adversarial 分支
 
 ---
 
@@ -253,40 +266,36 @@ python src/scripts/analyze_stats.py \
 
 每个 epoch 记录：
 
-- train_loss
-- val_dice / iou / precision / recall / f1 / minority_f1 / hd95
-- unsup_conf_mean / reliability_mean / ood_mean / consistency_mean
+- `train_loss`
+- `val_dice / val_iou / val_precision / val_recall / val_f1 / val_minority_f1 / val_hd95`
+- `unsup_conf_mean / reliability_mean / ood_mean / consistency_mean`
 
-最终统计：
+建议报告：
 
-- 单因素 ANOVA
-- Tukey HSD
-- Cohen’s d
-- 95% CI
-
-见：
-
-- `src/analysis/stats.py`
-- `src/scripts/analyze_stats.py`
+- 3 seeds 的 mean ± std
+- 单因素 ANOVA / Tukey HSD / Cohen’s d / 95% CI
 
 ---
 
 ## 9. 复现实验建议流程
 
 1. 生成 split（确保过滤 `._` 脏文件）
-2. 跑单组 E 冒烟测试
-3. 跑全部 ablation（A~E, R1~R4）
-4. 汇总与统计
-5. 导出可视化成功/失败样例与误差图
+2. 跑单组 E 冒烟测试（seed=0）
+3. 跑 E 组 seeds=[0,1,2]
+4. 跑 method suite（Supervised/MT/Ours 等）
+5. 汇总与统计
+6. 导出可视化成功/失败样例与误差图
 
 ---
 
 ## 10. 引用说明
 
-如果你在论文中使用本仓库，请在方法章节描述以下关键模块：
+若用于论文，请在方法部分描述以下关键模块：
 
-- Mean Teacher 半监督框架
+- Mean Teacher 半监督框架（EMA teacher）
 - 动态伪标签权重与可靠性融合
+- CPS 双学生交叉伪监督
 - 少数类敏感损失
 - 结构先验（边界+拓扑+HD）
 - 多尺度注意力与轻量 Transformer 编码器
+- （可选）对抗判别分支

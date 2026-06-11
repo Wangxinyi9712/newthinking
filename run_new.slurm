@@ -19,33 +19,62 @@ python src/scripts/train.py --config src/configs/brats_group_e.yaml
 
 python src/scripts/evaluate.py \
   --config src/configs/brats_group_e.yaml \
-  --ckpt runs/brats_group_e/seed_0/best.pt \
+  --ckpt best \
+  --split seed_0 \
   --source teacher
 
 python src/scripts/evaluate.py \
   --config src/configs/brats_group_e.yaml \
-  --ckpt runs/brats_group_e/seed_0/best.pt \
+  --ckpt best \
+  --split seed_0 \
   --source student
+
 python src/scripts/evaluate.py \
   --config src/configs/brats_group_e.yaml \
-  --ckpt runs/brats_group_e/seed_0/best.pt \
+  --ckpt best \
+  --split seed_0 \
   --source ensemble
+
+python src/scripts/evaluate.py \
+  --config src/configs/brats_group_e.yaml \
+  --ckpt last \
+  --split seed_0 \
+  --source teacher
 
 
 python src/scripts/infer.py \
   --config src/configs/brats_group_e.yaml \
-  --ckpt runs/brats_group_e/seed_0/best.pt \
-  --out runs/brats_group_e/infer_seed0 \
+  --ckpt best \
+  --split seed_0 \
+  --out runs/brats_group_e/infer_best_seed0_teacher \
   --source teacher
 
 python src/scripts/infer.py \
   --config src/configs/brats_group_e.yaml \
-  --ckpt runs/brats_group_e/seed_0/best.pt \
-  --out runs/brats_group_e/infer_seed0 \
+  --ckpt best \
+  --split seed_0 \
+  --out runs/brats_group_e/infer_best_seed0_student \
   --source student
 
 python src/scripts/infer.py \
   --config src/configs/brats_group_e.yaml \
-  --ckpt runs/brats_group_e/seed_0/best.pt \
-  --out runs/brats_group_e/infer_seed0 \
+  --ckpt best \
+  --split seed_0 \
+  --out runs/brats_group_e/infer_best_seed0_ensemble \
   --source ensemble
+
+python method/run_method_suite.py \
+  --base-config src/configs/brats_group_e.yaml \
+  --suite src/configs/method_suite.yaml
+
+# 如需直接跑所有方法 + 全seed，取消下面注释
+python method/run_method_suite.py \
+ --base-config src/configs/brats_group_e.yaml \
+ --suite src/configs/method_suite.yaml \
+ --run
+
+# 汇总方法对比结果
+python method/summarize_method_suite.py \
+  --suite src/configs/method_suite.yaml \
+  --runs-root runs/method_suite \
+  --out method/method_comparison.csv

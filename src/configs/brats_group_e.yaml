@@ -26,34 +26,40 @@ train:
   use_amp: true
   grad_accum_steps: 2
   warmup_epochs: 12
-  seed: [0, 1, 2]
+  seed: [0]
 
 loss:
-  tau: 0.65
+  # core
+  tau: 0.62
   lambda_ssl: 1.0
   lambda_minor: 0.8
   lambda_struct: 0.08
-  lambda_feat_consistency: 0.0
-  lambda_cps: 0.4
-  lambda_sdm: 0.2
+  lambda_feat_consistency: 0.05
 
-  teacher_temperature: 1.5
-  tau_quantile: 0.70
-  soft_gate_power: 1.0
+  # CPS + shape-aware
+  lambda_cps: 0.30
+  lambda_sdm: 0.15
+
+  # adaptive pseudo-label + risk
+  teacher_temperature: 1.4
+  tau_quantile: 0.65
+  soft_gate_power: 0.9
   cvar_ratio: 0.20
 
+  # structural
   hd_weight: 0.25
   fg_weight: 2.0
   topo_weight: 0.08
 
+  # class imbalance
   focal_alpha: 0.25
   focal_gamma: 2.0
   auto_class_weights: false
   minor_class_weights: [2.0]
 
-  # adversarial branch
+  # adversarial (robust setting)
   use_adversarial: true
-  lambda_adv: 0.05
+  lambda_adv: 0.02
   lambda_d: 0.5
   d_steps: 1
 
@@ -67,7 +73,7 @@ loss:
     w_ood: 0.15
     minority_reliability_boost: 0.15
     fusion_mode: convex
-    fusion_alpha: 0.75
+    fusion_alpha: 0.80
 
 ablation_switches:
   minority_score: true
@@ -77,7 +83,7 @@ ablation_switches:
 
 inference:
   use_teacher_ema: true
-  threshold: 0.40
+  threshold: 0.45  # 建议后续做val sweep: 0.40~0.55
 
 log:
   out_dir: runs/brats_group_e

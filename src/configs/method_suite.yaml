@@ -1,0 +1,80 @@
+suite_name: brats_method_comparison
+
+common_rules:
+  backbone: HybridUNet
+  same_split: true
+  same_epochs: true
+  same_seeds: [0, 1, 2]
+  same_preprocess: true
+  same_inference_threshold: true
+
+methods:
+  supervised:
+    desc: "Only labeled supervision"
+    overrides:
+      loss:
+        lambda_ssl: 0.0
+        lambda_cps: 0.0
+        lambda_feat_consistency: 0.0
+        use_adversarial: false
+      ablation_switches:
+        reliability: false
+        consistency: false
+        ood: false
+
+  self_training:
+    desc: "Pseudo-label self-training (no MT consistency / no CPS / no reliability)"
+    overrides:
+      loss:
+        lambda_ssl: 1.0
+        lambda_cps: 0.0
+        lambda_feat_consistency: 0.0
+        use_adversarial: false
+      ablation_switches:
+        reliability: false
+        consistency: false
+        ood: false
+
+  gan_ssl:
+    desc: "Supervised + adversarial branch"
+    overrides:
+      loss:
+        lambda_ssl: 0.0
+        lambda_cps: 0.0
+        lambda_feat_consistency: 0.0
+        use_adversarial: true
+        lambda_adv: 0.02
+      ablation_switches:
+        reliability: false
+        consistency: false
+        ood: false
+
+  mean_teacher:
+    desc: "EMA mean teacher + unsupervised consistency"
+    overrides:
+      loss:
+        lambda_ssl: 1.0
+        lambda_cps: 0.0
+        lambda_feat_consistency: 0.0
+        use_adversarial: false
+      ablation_switches:
+        reliability: false
+        consistency: true
+        ood: false
+
+  mt_reliability:
+    desc: "Mean teacher + reliability fusion (without CPS)"
+    overrides:
+      loss:
+        lambda_ssl: 1.0
+        lambda_cps: 0.0
+        lambda_feat_consistency: 0.05
+        use_adversarial: false
+      ablation_switches:
+        reliability: true
+        consistency: true
+        ood: true
+
+  ours:
+    desc: "Full model: MT + CPS + reliability + OOD + SDM + adversarial"
+    overrides: {}
