@@ -3,6 +3,12 @@ from __future__ import annotations
 import argparse
 import subprocess
 from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from data.datasets import build_dataloaders
 
 
 DEFAULT_EXPERIMENTS = ["a", "b", "c", "d", "e", "r1", "r2", "r3", "r4"]
