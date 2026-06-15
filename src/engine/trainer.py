@@ -11,100 +11,138 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 
 from losses.seg_losses import (
+    adaptive_tau_from_quantile,
+    cps_loss,
+    minority_sensitive_loss,
+    structural_loss,
     supervised_loss,
     unsupervised_loss,
-    cps_loss,
-    sdm_loss,
-    minority_sensitive_loss,
-    adaptive_tau_from_quantile,
-    teacher_prob_with_temperature,
-    dynamic_pseudo_weight,
 )
 
-from utils.metrics import compute_binary_metrics
+
+# =========================================================
+# Spectral Energy Prior (stable version)
+# =========================================================
+def spectral_energy(p1: torch.Tensor, p2: torch.Tensor):
+    dims = tuple(range(2, p1.ndim))
+
+    f1 = torch.fft.fftn(p1.float(), dim=dims)
+    f2 = torch.fft.fftn(p2.float(), dim=dims)
+
+    a1 = torch.abs(f1)
+    a2 = torch.abs(f2)
+
+    # stable frequency split
+    low1 = F.avg_pool3d(a1, 3, 1, 1)
+    low2 = F.avg_pool3d(a2, 3, 1, 1)
+
+    high1 = a1 - low1
+    high2 = a2 - low2
+
+    return F.l1_loss(low1, low2) + 0.5 * F.l1_loss(high1, high2)
 
 
 # =========================================================
-# TMI: INFORMATION THEORY UTILITIES
+# Uncertainty (simple + stable)
 # =========================================================
+def uncertainty(p1, p2):
+    eps = 1e-6
+    p1 = p1.clamp(eps, 1 - eps)
+    p2 = p2.clamp(eps, 1 - eps)
 
-def entropy(p: torch.Tensor):
-    p = torch.clamp(p, 1e-6, 1 - 1e-6)
-    return -(p * torch.log(p) + (1 - p) * torch.log(1 - p))
+    entropy = -(p1 * torch.log(p1) + (1 - p1) * torch.log(1 - p1))
+    disagreement = (p1 - p2).abs()
 
-
-def mutual_uncertainty(p_s, p_t):
-    # disagreement proxy
-    return torch.abs(p_s - p_t)
-
-
-def spectral_consistency_loss(x1, x2):
-    """
-    Fourier consistency (TMI replacement for GAN)
-    """
-    f1 = torch.fft.fftn(x1.float(), dim=list(range(2, x1.ndim)))
-    f2 = torch.fft.fftn(x2.float(), dim=list(range(2, x2.ndim)))
-
-    return F.l1_loss(torch.abs(f1), torch.abs(f2))
+    return (entropy + disagreement).mean()
 
 
 # =========================================================
-# EMA (UNCERTAINTY-AWARE)
+# EMA update (stable Bayesian form)
 # =========================================================
-
 @torch.no_grad()
-def update_teacher_uncertainty_ema(student, teacher, p_s, p_t, gamma=2.0):
-    """
-    θ_t = α(x)θ_t + (1-α(x))θ_s
-    α(x)=sigmoid(γU)
-    """
-    u = mutual_uncertainty(p_s, p_t).mean(dim=(1, 2, 3, 4), keepdim=True)
-    alpha = torch.sigmoid(gamma * u)
+def ema_update(student, teacher, u, base=0.99):
+    u = float(torch.nan_to_num(u).detach().cpu())
+    alpha = base / (1.0 + u)
+    alpha = float(torch.clamp(torch.tensor(alpha), 0.90, 0.999))
 
-    for t_p, s_p in zip(teacher.parameters(), student.parameters()):
-        t_p.data.mul_(alpha.mean()).add_(s_p.data * (1 - alpha.mean()))
+    for t, s in zip(teacher.parameters(), student.parameters()):
+        t.data.mul_(alpha).add_(s.data * (1 - alpha))
+
+
+def _safe(x):
+    return float(torch.nan_to_num(x).item())
 
 
 # =========================================================
-# TRAINER
+# Trainer
 # =========================================================
-
 class MeanTeacherTrainer:
-
     def __init__(self, student, cfg):
         self.cfg = cfg
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.student = student.to(self.device)
+        self.student_aux = deepcopy(student).to(self.device)
         self.teacher = deepcopy(student).to(self.device)
         self.teacher.eval()
 
-        # optimizer
-        self.optim = Adam(self.student.parameters(), lr=cfg["train"]["lr"])
+        self.optim = Adam(
+            list(self.student.parameters()) + list(self.student_aux.parameters()),
+            lr=float(cfg["train"]["lr"]),
+        )
 
         self.scheduler = CosineAnnealingLR(
             self.optim,
-            T_max=cfg["train"]["epochs"],
-            eta_min=cfg["train"].get("min_lr", 1e-6),
+            T_max=int(cfg["train"]["epochs"]),
+            eta_min=float(cfg["train"].get("min_lr", 1e-6)),
         )
 
-        self.epochs = cfg["train"]["epochs"]
-        self.lambda_ssl = cfg["loss"]["lambda_ssl"]
-        self.lambda_struct = cfg["loss"].get("lambda_struct", 0.1)
+        self.epochs = int(cfg["train"]["epochs"])
+        self.grad_clip = float(cfg["train"]["grad_clip"])
+        self.grad_accum = int(cfg["train"]["grad_accum_steps"])
+        self.use_amp = bool(cfg["train"].get("use_amp", True)) and self.device.type == "cuda"
 
-        self.teacher_temp = cfg["loss"].get("teacher_temperature", 1.5)
+        self.scaler = torch.amp.GradScaler("cuda", enabled=self.use_amp)
+
+        # weights
+        self.lambda_u = float(cfg["loss"]["lambda_ssl"])
+        self.lambda_c = float(cfg["loss"]["lambda_cps"])
+        self.lambda_s = float(cfg["loss"]["lambda_struct"])
+        self.lambda_m = float(cfg["loss"]["lambda_minor"])
+        self.lambda_f = 0.15
+        self.lambda_freq = 0.25
 
     # =====================================================
-    def train_one_epoch(self, loaders, epoch):
+    def fit(self, loaders, out_dir):
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
 
+        best = -1
+
+        for epoch in range(self.epochs):
+            loss = self.train_epoch(loaders, epoch)
+            metric = self.evaluate(loaders["val"])
+
+            if metric.dice > best:
+                best = metric.dice
+                torch.save(self.student.state_dict(), out / "best.pt")
+
+        torch.save(self.student.state_dict(), out / "last.pt")
+
+    # =====================================================
+    def train_epoch(self, loaders, epoch):
         self.student.train()
+        self.student_aux.train()
 
         unlabeled_iter = iter(loaders["unlabeled"])
-
         running = 0.0
+        step = 0
 
-        for batch in tqdm(loaders["labeled"]):
+        self.optim.zero_grad(set_to_none=True)
 
+        pbar = tqdm(loaders["labeled"], desc=f"epoch {epoch}")
+
+        for batch in pbar:
             try:
                 ub = next(unlabeled_iter)
             except StopIteration:
@@ -113,127 +151,98 @@ class MeanTeacherTrainer:
 
             x_l = batch["image"].to(self.device)
             y_l = batch["label"].to(self.device)
-
             x_u = ub["image"].to(self.device)
 
-            # ---------------- supervised ----------------
-            s_l, _, _ = self.student(x_l, return_features=True)
-            loss_sup = supervised_loss(s_l, y_l)
+            with torch.amp.autocast("cuda", enabled=self.use_amp):
 
-            # ---------------- teacher ----------------
-            with torch.no_grad():
-                t_u, _, _ = self.teacher(x_u, return_features=True)
-                t_prob = torch.sigmoid(t_u)
+                s_l, _ = self.student(x_l, return_features=True)
+                s2_l, _ = self.student_aux(x_l, return_features=True)
 
-            s_u, _, _ = self.student(x_u, return_features=True)
-            s_prob = torch.sigmoid(s_u)
+                sup = supervised_loss(s_l, y_l) + supervised_loss(s2_l, y_l)
 
-            # ---------------- pseudo label ----------------
-            tau = adaptive_tau_from_quantile(
-                t_prob, q=0.65, min_tau=0.5, max_tau=0.9
-            )
+                with torch.no_grad():
+                    t_u, _ = self.teacher(x_u, return_features=True)
+                    t_prob = torch.sigmoid(t_u)
 
-            pseudo_w = dynamic_pseudo_weight(t_prob, tau=tau)
+                s_u, _ = self.student(x_u, return_features=True)
+                s2_u, _ = self.student_aux(x_u, return_features=True)
 
-            # ---------------- INFORMATION UNCERTAINTY ----------------
-            ent = entropy(s_prob)
-            mu = mutual_uncertainty(s_prob, t_prob)
+                p_u = torch.sigmoid(s_u)
+                p2_u = torch.sigmoid(s2_u)
 
-            uncertainty = (ent + mu).detach()
+                tau = adaptive_tau_from_quantile(t_prob)
 
-            # spectral consistency (replace GAN)
-            loss_spec = spectral_consistency_loss(s_prob, t_prob)
+                l_unsup = unsupervised_loss(s_u, t_prob, tau=tau)
+                l_unsup2 = unsupervised_loss(s2_u, t_prob, tau=tau)
 
-            # ---------------- unsupervised ----------------
-            loss_unsup = unsupervised_loss(
-                s_u,
-                t_prob,
-                tau=tau,
-                fused_weight=pseudo_w,
-                soft_gate=torch.exp(-uncertainty),
-            )
+                cps = cps_loss(s_u, s2_u)
 
-            # ---------------- cps ----------------
-            loss_cps = cps_loss(s_u, s_u)
-
-            # ---------------- structural ----------------
-            loss_struct = sdm_loss(s_l, y_l)
-
-            # ---------------- total loss ----------------
-            loss = (
-                loss_sup
-                + self.lambda_ssl * loss_unsup
-                + 0.3 * loss_cps
-                + self.lambda_struct * loss_struct
-                + 0.2 * loss_spec
-            )
-
-            self.optim.zero_grad()
-            loss.backward()
-            self.optim.step()
-
-            # =================================================
-            # UNCERTAINTY-AWARE TEACHER UPDATE (KEY CONTRIBUTION)
-            # =================================================
-            with torch.no_grad():
-                update_teacher_uncertainty_ema(
-                    self.student,
-                    self.teacher,
-                    s_prob,
-                    t_prob,
-                    gamma=2.0,
+                minor = minority_sensitive_loss(
+                    s_l, y_l,
+                    torch.tensor([2.0], device=self.device)
                 )
 
-            running += loss.item()
+                struct = structural_loss(s_l, y_l)
 
-        return running / len(loaders["labeled"])
+                freq = spectral_energy(p_u, p2_u)
+
+                unc = uncertainty(p_u, p2_u)
+
+                loss = (
+                               sup
+                               + self.lambda_u * (l_unsup + l_unsup2)
+                               + self.lambda_c * cps
+                               + self.lambda_s * struct
+                               + self.lambda_m * minor
+                               + self.lambda_freq * freq
+                       ) / self.grad_accum
+
+            self.scaler.scale(loss).backward()
+
+            if (step + 1) % self.grad_accum == 0:
+                self.scaler.unscale_(self.optim)
+                torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.grad_clip)
+
+                self.scaler.step(self.optim)
+                self.scaler.update()
+                self.optim.zero_grad(set_to_none=True)
+
+                ema_update(
+                    self.student,
+                    self.teacher,
+                    u=unc,
+                    base=0.99,
+                )
+
+            running += _safe(loss)
+            step += 1
+
+        self.scheduler.step()
+        return running / max(1, step)
 
     # =====================================================
+    @torch.no_grad()
     def evaluate(self, loader):
-
         self.student.eval()
-        self.teacher.eval()
 
-        metrics = []
+        d = 0
+        n = 0
 
-        for batch in loader:
-            x = batch["image"].to(self.device)
-            y = batch["label"].to(self.device)
+        for b in loader:
+            x = b["image"].to(self.device)
+            y = b["label"].to(self.device)
 
-            with torch.no_grad():
-                logits, _, _ = self.teacher(x, return_features=True)
+            logits, _ = self.student(x)
+            from utils.metrics import compute_binary_metrics
 
             m = compute_binary_metrics(logits, y)
 
-            metrics.append(m.dice)
+            d += float(m.dice)
+            n += 1
 
-        return sum(metrics) / len(metrics)
+        from utils.metrics import SegMetrics
 
-    # =====================================================
-    def fit(self, loaders, out_dir):
-
-        out_dir = Path(out_dir)
-        out_dir.mkdir(exist_ok=True, parents=True)
-
-        best = 0
-
-        for epoch in range(self.epochs):
-
-            loss = self.train_one_epoch(loaders, epoch)
-            self.scheduler.step()
-
-            dice = self.evaluate(loaders["val"])
-
-            print(f"[Epoch {epoch}] loss={loss:.4f} dice={dice:.4f}")
-
-            if dice > best:
-                best = dice
-                torch.save(
-                    {
-                        "student": self.student.state_dict(),
-                        "teacher": self.teacher.state_dict(),
-                    },
-                    out_dir / "best.pt",
-                )
-
-        torch.save(self.student.state_dict(), out_dir / "last.pt")
+        return SegMetrics(
+            dice=d / max(1, n),
+            iou=0, precision=0, recall=0, f1=0, minority_f1=0, hd95=0,
+        )
