@@ -1,40 +1,47 @@
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
 import yaml
 
 
-@dataclass
-class Config:
-    data: dict[str, Any]
-    model: dict[str, Any]
-    train: dict[str, Any]
-    loss: dict[str, Any]
-    inference: dict[str, Any]
-    log: dict[str, Any]
+class Config(dict):
+    """
+    dict-based config (TMI stable version)
+    supports cfg["train"] style only
+    """
 
-    ablation_switches: dict[str, Any] = field(default_factory=dict)
+    def __getattr__(self, item):
+        try:
+            return self[item]
+        except KeyError:
+            raise AttributeError(item)
 
-    def __getitem__(self, key):
-        return getattr(self, key)
+    def __setattr__(self, key, value):
+        self[key] = value
 
     def get(self, key, default=None):
-        return getattr(self, key, default)
+        return super().get(key, default)
 
 
-def load_config(path: str | Path):
+def load_config(path: str | Path) -> Config:
     path = Path(path)
 
     if not path.exists():
-        root = Path(__file__).resolve().parents[1]
-        alt = root / path
+        root = Path(__file__).resolve().parents[2]
+        alt = root / "src" / "configs" / path.name
+
         if alt.exists():
             path = alt
         else:
-            raise FileNotFoundError(f"config not found: {path}")
+            raise FileNotFoundError(f"Config not found: {path}")
 
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
-    return raw
+    required = ["data", "model", "train", "loss", "inference", "log"]
+
+    for k in required:
+        if k not in raw:
+            raise ValueError(f"Missing config section: {k}")
+
+    cfg = Config(raw)
+    return cfg

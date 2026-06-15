@@ -1,147 +1,86 @@
 from __future__ import annotations
 
-import argparse
-import json
-import warnings
-from dataclasses import asdict, is_dataclass
-from pathlib import Path
-import sys
+import os
+import random
+import numpy as np
+import torch
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from data.datasets import build_dataloaders
-from engine.trainer import MeanTeacherTrainer
-from models.seg_model import HybridUNet
-from utils.config import load_config
-from utils.seed import set_seed
-
-warnings.filterwarnings(
-    "ignore",
-    message="single channel prediction, `include_background=False` ignored.",
-)
+from src.utils.config import load_config
+from src.data.datasets import build_dataloaders
+from src.models.seg_model import HybridUNet
+from src.engine.trainer import MeanTeacherTrainer
 
 
-def _to_plain_dict(obj):
-    if is_dataclass(obj):
-        return asdict(obj)
+# =========================
+# reproducibility
+# =========================
 
-    if isinstance(obj, dict):
-        return {k: _to_plain_dict(v) for k, v in obj.items()}
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
 
-    if isinstance(obj, (list, tuple)):
-        return [_to_plain_dict(v) for v in obj]
-
-    return obj
-
-
-def _save_config_used(cfg, run_dir: Path):
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    with open(
-        run_dir / "config_used.json",
-        "w",
-        encoding="utf-8",
-    ) as f:
-        json.dump(
-            _to_plain_dict(cfg),
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
 
 
-def _build_model(cfg):
-    dim = 3 if cfg.data.get("dim", "3d") == "3d" else 2
+# =========================
+# config flatten helper
+# =========================
 
-    return HybridUNet(
-        in_channels=int(cfg.model["in_channels"]),
-        out_channels=int(cfg.model["out_channels"]),
-        channels=tuple(cfg.model["channels"]),
-        dim=dim,
-        use_transformer=bool(
-            cfg.model.get("use_transformer", True)
-        ),
-    )
+def cfg_to_dict(cfg):
+    """
+    dataclass -> dict safe conversion
+    """
+    if hasattr(cfg, "__dict__"):
+        return cfg.__dict__
+    return cfg
 
+
+# =========================
+# main
+# =========================
 
 def main():
-    parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        "--config",
-        required=True,
-        type=str,
-    )
+    cfg_obj = load_config("src/configs/brats_group_e.yaml")
+    cfg = cfg_to_dict(cfg_obj)
 
-    parser.add_argument(
-        "--seed",
-        default=None,
-        type=int,
-    )
+    # seed handling
+    seed_list = cfg["train"].get("seed", [0])
+    set_seed(seed_list[0])
 
-    parser.add_argument(
-        "--run-name",
-        default="",
-        type=str,
-    )
+    print("[INFO] Loading dataset...")
 
-    args = parser.parse_args()
-
-    cfg = load_config(args.config)
-
-    if args.seed is not None:
-        seed = int(args.seed)
-
-    else:
-        seeds = cfg.train.get("seed", [0])
-
-        if isinstance(seeds, list):
-            seed = int(seeds[0])
-        else:
-            seed = int(seeds)
-
-    set_seed(seed)
-
-    out_dir = Path(cfg.log["out_dir"])
-
-    if args.run_name:
-        out_dir = (
-            out_dir.parent
-            / f"{out_dir.name}_{args.run_name}"
-        )
-
-    run_dir = out_dir / f"seed_{seed}"
-
-    run_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    _save_config_used(cfg, run_dir)
-
-    print(f"[Train] config={args.config}")
-    print(f"[Train] seed={seed}")
-    print(f"[Train] run_dir={run_dir}")
-
-    # ===== 正确写法 =====
     loaders = build_dataloaders(cfg["data"])
 
-    model = _build_model(cfg)
+    print("[INFO] Building model...")
+
+    model_cfg = cfg["model"]
+
+    model = HybridUNet(
+        in_channels=model_cfg["in_channels"],
+        out_channels=model_cfg["out_channels"],
+        base_channels=model_cfg.get("channels", [32, 64, 128, 256]),
+        use_transformer=model_cfg.get("use_transformer", True),
+    )
+
+    print("[INFO] Initializing trainer...")
 
     trainer = MeanTeacherTrainer(
-        model=model,
-        cfg=cfg,
+        student=model,
+        cfg=cfg
     )
+
+    out_dir = cfg["log"]["out_dir"]
+
+    print("[INFO] Start training...")
 
     trainer.fit(
         loaders=loaders,
-        save_dir=str(run_dir),
+        out_dir=out_dir
     )
-
-    print("[Train] Done.")
-    print(f"[Train] Best checkpoint : {run_dir/'best.pt'}")
-    print(f"[Train] Last checkpoint : {run_dir/'last.pt'}")
 
 
 if __name__ == "__main__":
