@@ -7,80 +7,53 @@ import torch
 
 from src.utils.config import load_config
 from src.data.datasets import build_dataloaders
-from src.models.seg_model import HybridUNet
 from src.engine.trainer import MeanTeacherTrainer
+from src.models.seg_model import HybridUNet
 
 
-# =========================
-# reproducibility
-# =========================
-
-def set_seed(seed: int):
+def seed_all(seed: int = 0):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark = True
-
-
-# =========================
-# config flatten helper
-# =========================
-
-def cfg_to_dict(cfg):
-    """
-    dataclass -> dict safe conversion
-    """
-    if hasattr(cfg, "__dict__"):
-        return cfg.__dict__
-    return cfg
-
-
-# =========================
-# main
-# =========================
 
 def main():
 
-    cfg_obj = load_config("src/configs/brats_group_e.yaml")
-    cfg = cfg_to_dict(cfg_obj)
+    cfg = load_config("src/configs/brats_group_e.yaml")
 
-    # seed handling
-    seed_list = cfg["train"].get("seed", [0])
-    set_seed(seed_list[0])
+    # -------------------------
+    # SAFE CFG ACCESS (FIX KEYERROR)
+    # -------------------------
+    train_cfg = cfg.get("train", {})
+    seeds = train_cfg.get("seed", [0])
+    seed = seeds[0] if isinstance(seeds, list) else int(seeds)
 
-    print("[INFO] Loading dataset...")
+    seed_all(seed)
 
+    # -------------------------
+    # DATA
+    # -------------------------
     loaders = build_dataloaders(cfg["data"])
 
-    print("[INFO] Building model...")
-
-    model_cfg = cfg["model"]
-
+    # -------------------------
+    # MODEL
+    # -------------------------
+    model_cfg = cfg.get("model", {})
     model = HybridUNet(
-        in_channels=model_cfg["in_channels"],
-        out_channels=model_cfg["out_channels"],
-        base_channels=model_cfg.get("channels", [32, 64, 128, 256]),
-        use_transformer=model_cfg.get("use_transformer", True),
+        in_channels=model_cfg.get("in_channels", 4),
+        out_channels=model_cfg.get("out_channels", 1),
+        base_channels=model_cfg.get("channels", [32, 64, 128, 256])[0],
     )
 
-    print("[INFO] Initializing trainer...")
+    # -------------------------
+    # TRAINER
+    # -------------------------
+    trainer = MeanTeacherTrainer(model, cfg)
 
-    trainer = MeanTeacherTrainer(
-        student=model,
-        cfg=cfg
-    )
+    out_dir = cfg.get("log", {}).get("out_dir", "runs/exp")
 
-    out_dir = cfg["log"]["out_dir"]
-
-    print("[INFO] Start training...")
-
-    trainer.fit(
-        loaders=loaders,
-        out_dir=out_dir
-    )
+    trainer.fit(loaders, out_dir)
 
 
 if __name__ == "__main__":
