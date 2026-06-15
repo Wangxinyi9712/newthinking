@@ -2,82 +2,50 @@ import torch
 import torch.nn.functional as F
 
 
-# -------------------------
-# supervised
-# -------------------------
+# --------------------------
+# supervised loss
+# --------------------------
 def supervised_loss(logits, target):
     target = target.float()
     return F.binary_cross_entropy_with_logits(logits, target)
 
 
-# -------------------------
-# entropy
-# -------------------------
-def entropy(p):
-    p = torch.clamp(p, 1e-6, 1 - 1e-6)
-    return -(p * torch.log(p) + (1 - p) * torch.log(1 - p))
-
-
-# -------------------------
-# mutual information uncertainty (TMI KEY)
-# U = H(p) - E[p log p]
-# -------------------------
-def mutual_information_uncertainty(p):
-    h = entropy(p)
-    ep = -(p * torch.log(torch.clamp(p, 1e-6, 1 - 1e-6)))
-    return h - ep.mean(dim=1, keepdim=True)
-
-
-# -------------------------
-# uncertainty weight
-# -------------------------
-def uncertainty_weight(p):
-    u = mutual_information_uncertainty(p)
-    w = torch.exp(-u)
-    return w / (w.mean() + 1e-6)
-
-
-# -------------------------
-# unsupervised loss
-# -------------------------
-def unsupervised_loss(logits, pseudo, weight=None):
-    pseudo = pseudo.detach()
-    loss = F.binary_cross_entropy_with_logits(logits, pseudo, reduction="none")
-
-    if weight is not None:
-        loss = loss * weight
-
-    return loss.mean()
-
-
-# -------------------------
-# CPS
-# -------------------------
-def cps_loss(p1, p2):
-    return F.mse_loss(torch.sigmoid(p1), torch.sigmoid(p2))
-
-
-# -------------------------
-# Spectral Consistency Loss (TMI FINAL KEY CONTRIBUTION)
-# -------------------------
-def spectral_consistency_loss(x1, x2):
-    """
-    Fourier domain consistency:
-    - amplitude consistency
-    - reviewer-friendly "physics constraint"
-    """
+# --------------------------
+# spectral consistency loss (NEW TMI CORE)
+# --------------------------
+def spectral_consistency_loss(student_logits, teacher_logits):
 
     def fft(x):
-        return torch.fft.fftn(x.float(), dim=tuple(range(2, x.ndim)))
+        return torch.fft.fftn(x, dim=(2, 3, 4)).abs()
 
-    f1 = fft(x1)
-    f2 = fft(x2)
+    s = fft(student_logits)
+    t = fft(teacher_logits)
 
-    a1 = torch.abs(f1)
-    a2 = torch.abs(f2)
-
-    return F.l1_loss(a1, a2)
+    return F.mse_loss(s, t)
 
 
-# alias for backward compatibility
-sdm_loss = spectral_consistency_loss
+# --------------------------
+# uncertainty (entropy)
+# --------------------------
+def entropy(p):
+    return -(p * torch.log(p + 1e-6) + (1 - p) * torch.log(1 - p + 1e-6))
+
+
+def mutual_information(p):
+    return entropy(p) - entropy(p.mean(dim=0, keepdim=True))
+
+
+# --------------------------
+# pseudo consistency
+# --------------------------
+def unsupervised_loss(student_logits, teacher_prob):
+
+    student_prob = torch.sigmoid(student_logits)
+    return F.mse_loss(student_prob, teacher_prob)
+
+
+# --------------------------
+# CPS loss
+# --------------------------
+def cps_loss(p1, p2):
+    return F.mse_loss(torch.sigmoid(p1), torch.sigmoid(p2))
