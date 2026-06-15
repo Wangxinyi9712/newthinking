@@ -1,6 +1,4 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -16,19 +14,27 @@ class Config:
     inference: dict[str, Any]
     log: dict[str, Any]
 
-    # 添加下标访问支持
+    ablation_switches: dict[str, Any] = field(default_factory=dict)
+
     def __getitem__(self, key):
         return getattr(self, key)
 
-    # 添加 get 支持
     def get(self, key, default=None):
         return getattr(self, key, default)
 
-def load_config(path: str | Path) -> Config:
+
+def load_config(path: str | Path):
+    path = Path(path)
+
+    if not path.exists():
+        root = Path(__file__).resolve().parents[1]
+        alt = root / path
+        if alt.exists():
+            path = alt
+        else:
+            raise FileNotFoundError(f"config not found: {path}")
+
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
-    required = ["data", "model", "train", "loss", "inference", "log"]
-    missing = [k for k in required if k not in raw]
-    if missing:
-        raise ValueError(f"Missing config sections: {missing}")
-    return Config(**{k: raw[k] for k in required})
+
+    return raw

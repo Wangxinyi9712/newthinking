@@ -6,7 +6,6 @@ data:
   batch_size: 1
   num_workers: 0
   pin_memory: false
-  cache_rate: 0.1
   minority_oversample: true
   minority_oversample_power: 1.5
 

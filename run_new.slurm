@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -o slurm_out_new.log
 #SBATCH -e slurm_err_new.log
-#SBATCH --partition=gpu-l20
+#SBATCH --partition=gpu-a10
 #SBATCH --qos=normal
 #SBATCH -J newthinking
 #SBATCH --nodes=1
@@ -40,28 +40,6 @@ python src/scripts/evaluate.py \
   --ckpt last \
   --split seed_0 \
   --source teacher
-
-
-python src/scripts/infer.py \
-  --config src/configs/brats_group_e.yaml \
-  --ckpt best \
-  --split seed_0 \
-  --out runs/brats_group_e/infer_best_seed0_teacher \
-  --source teacher
-
-python src/scripts/infer.py \
-  --config src/configs/brats_group_e.yaml \
-  --ckpt best \
-  --split seed_0 \
-  --out runs/brats_group_e/infer_best_seed0_student \
-  --source student
-
-python src/scripts/infer.py \
-  --config src/configs/brats_group_e.yaml \
-  --ckpt best \
-  --split seed_0 \
-  --out runs/brats_group_e/infer_best_seed0_ensemble \
-  --source ensemble
 
 python method/run_method_suite.py \
   --base-config src/configs/brats_group_e.yaml \

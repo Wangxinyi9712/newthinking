@@ -102,7 +102,7 @@ def main():
 
     model, _ = _load_model_from_ckpt(cfg, ckpt_path, source=args.source)
 
-    loaders = build_dataloaders(cfg.data)
+    loaders = build_dataloaders(cfg["data"])
     trainer = MeanTeacherTrainer(model, cfg)
 
     # 若source是teacher，尝试恢复teacher权重
