@@ -1,20 +1,31 @@
-from __future__ import annotations
-
+import torch
 import torch.nn as nn
-from .hybrid_unet import HybridUNet
 
 
-class ModelWrapper(nn.Module):
-    def __init__(self, model: nn.Module):
+class HybridUNet(nn.Module):
+
+    def __init__(self, in_channels=4, out_channels=1):
         super().__init__()
-        self.model = model
+
+        self.encoder = nn.Sequential(
+            nn.Conv3d(in_channels, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv3d(32, 64, 3, padding=1),
+            nn.ReLU()
+        )
+
+        self.decoder = nn.Sequential(
+            nn.Conv3d(64, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv3d(32, out_channels, 1)
+        )
 
     def forward(self, x, return_features=False):
-        out = self.model(x)
 
-        if isinstance(out, (tuple, list)):
-            logits, feat = out[0], out[1]
-        else:
-            logits, feat = out, out
+        f = self.encoder(x)
+        out = self.decoder(f)
 
-        return (logits, feat) if return_features else logits
+        if return_features:
+            return out, f
+
+        return out

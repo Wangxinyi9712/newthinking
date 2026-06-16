@@ -1,7 +1,6 @@
-from __future__ import annotations
-
 import torch
-import torch.nn.functional as F
+import csv
+from pathlib import Path
 from copy import deepcopy
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -9,93 +8,127 @@ from tqdm import tqdm
 
 from src.losses.seg_losses import (
     supervised_loss,
-    unsupervised_loss,
-    cps_loss,
     spectral_consistency_loss,
+    cps_loss,
+    topology_loss,
+    unsupervised_loss,
+    feature_contrastive_loss,
 )
+from src.utils.metrics import compute_binary_metrics
 
 
-# =========================================================
-# uncertainty-aware EMA (TMI KEY CONTRIBUTION)
-# θ_t = α(x)θ_t + (1-α(x))θ_s
-# =========================================================
 @torch.no_grad()
-def update_ema(student, teacher, x, base=0.99):
-
-    prob = torch.sigmoid(student(x)).mean()
-    entropy = -(prob * torch.log(prob + 1e-6))
-
-    alpha = base + (1 - base) * entropy.item()
-
-    for tp, sp in zip(teacher.parameters(), student.parameters()):
-        tp.data.mul_(alpha).add_(sp.data * (1 - alpha))
+def update_ema(student, teacher, base_m=0.99):
+    for t, s in zip(teacher.parameters(), student.parameters()):
+        t.data.mul_(base_m).add_(s.data * (1 - base_m))
 
 
 class MeanTeacherTrainer:
 
     def __init__(self, model, cfg):
 
+        self.cfg = cfg
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.student = model.to(self.device)
         self.teacher = deepcopy(model).to(self.device)
-        self.teacher.eval()
 
-        self.optim = Adam(self.student.parameters(), lr=cfg["train"]["lr"])
-        self.scheduler = CosineAnnealingLR(self.optim, T_max=cfg["train"]["epochs"])
+        self.optim = Adam(self.student.parameters(), lr=cfg.train["lr"])
+        self.scheduler = CosineAnnealingLR(
+            self.optim,
+            T_max=cfg.train["epochs"],
+            eta_min=cfg.train["min_lr"]
+        )
 
-        self.epochs = cfg["train"]["epochs"]
+        self.epochs = cfg.train["epochs"]
+        self.best_dice = -1.0
 
-        self.lambda_ssl = cfg["loss"].get("lambda_ssl", 1.0)
-        self.lambda_spec = cfg["loss"].get("lambda_spectral", 0.2)
-        self.lambda_cps = cfg["loss"].get("lambda_cps", 0.3)
-
-        self.scaler = torch.amp.GradScaler("cuda", enabled=True)
+        self.lambda_ssl = cfg.loss.get("lambda_ssl", 1.0)
+        self.lambda_cps = cfg.loss.get("lambda_cps", 0.3)
+        self.lambda_topo = cfg.loss.get("lambda_topo", 0.1)
+        self.lambda_feat = cfg.loss.get("lambda_feat", 0.05)
+        self.lambda_spec = cfg.loss.get("lambda_spec", 0.2)
 
     def fit(self, loaders, out_dir):
+
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
 
         for epoch in range(self.epochs):
 
             self.student.train()
-            unlabeled_iter = iter(loaders["unlabeled"])
 
             pbar = tqdm(loaders["labeled"], desc=f"epoch {epoch}")
 
             for batch in pbar:
 
-                ub = next(unlabeled_iter)
+                x = batch["image"].to(self.device)
+                y = batch["label"].to(self.device)
 
-                x_l = batch["image"].to(self.device).float()
-                y_l = batch["label"].to(self.device).float()
-                x_u = ub["image"].to(self.device).float()
+                xu = next(iter(loaders["unlabeled"]))["image"].to(self.device)
 
-                with torch.amp.autocast("cuda"):
+                sl, fl = self.student(x, return_features=True)
+                su, fu = self.student(xu, return_features=True)
 
-                    s_l = self.student(x_l)
-                    sup = supervised_loss(s_l, y_l)
+                with torch.no_grad():
+                    tl, ft = self.teacher(xu, return_features=True)
+                    pseudo = torch.sigmoid(tl)
 
-                    with torch.no_grad():
-                        t_u = self.teacher(x_u)
+                loss = (
+                    supervised_loss(sl, y)
+                    + self.lambda_ssl * unsupervised_loss(su, pseudo)
+                    + self.lambda_cps * cps_loss(sl, sl)
+                    + self.lambda_topo * topology_loss(sl, y)
+                    + self.lambda_feat * feature_contrastive_loss(fu, ft)
+                    + self.lambda_spec * spectral_consistency_loss(su, tl)
+                )
 
-                    s_u = self.student(x_u)
+                self.optim.zero_grad()
+                loss.backward()
+                self.optim.step()
 
-                    unsup = unsupervised_loss(s_u, torch.sigmoid(t_u))
-                    cps = cps_loss(s_u, t_u)
+                update_ema(self.student, self.teacher)
 
-                    spec = spectral_consistency_loss(s_u, t_u)
-
-                    loss = (
-                        sup
-                        + self.lambda_ssl * unsup
-                        + self.lambda_cps * cps
-                        + self.lambda_spec * spec
-                    )
-
-                self.scaler.scale(loss).backward()
-                self.scaler.step(self.optim)
-                self.scaler.update()
-                self.optim.zero_grad(set_to_none=True)
-
-                update_ema(self.student, self.teacher, x_u)
+                pbar.set_postfix(loss=float(loss))
 
             self.scheduler.step()
+
+            # =========================
+            # evaluation (light)
+            # =========================
+            self.student.eval()
+
+            dice_sum = 0
+            n = 0
+
+            for batch in loaders["val"]:
+
+                x = batch["image"].to(self.device)
+                y = batch["label"].to(self.device)
+
+                logits, _ = self.student(x, return_features=True)
+
+                m = compute_binary_metrics(logits, y)
+
+                dice_sum += m.dice
+                n += 1
+
+            dice = dice_sum / max(1, n)
+
+            # =========================
+            # checkpoint policy (STRICT)
+            # =========================
+            ckpt = {
+                "student": self.student.state_dict(),
+                "teacher": self.teacher.state_dict(),
+                "epoch": epoch,
+                "dice": dice
+            }
+
+            torch.save(ckpt, out_dir / "last.pt")
+
+            if dice > self.best_dice:
+                self.best_dice = dice
+                torch.save(ckpt, out_dir / "best.pt")
+
+            print(f"[Epoch {epoch}] dice={dice:.4f} best={self.best_dice:.4f}")

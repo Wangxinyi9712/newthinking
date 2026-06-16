@@ -1,141 +1,77 @@
-from __future__ import annotations
-
-import argparse
-import json
-from pathlib import Path
-import sys
-
-# ------------------------------
-# 确保可以导入 data 和 engine 模块
-ROOT = Path(__file__).resolve().parents[1]  # 指向 src
-sys.path.insert(0, str(ROOT))
-# ------------------------------
-
 import torch
+from monai.inferers import sliding_window_inference
 
-from data.datasets import build_dataloaders
-from engine.trainer import MeanTeacherTrainer
-from models.seg_model import HybridUNet
-from utils.config import load_config
-from utils.seed import set_seed
-
-
-def _resolve_ckpt(ckpt_arg: str, config_path: str, split: str = "seed_0") -> Path:
-    """
-    支持三种传法：
-    1) --ckpt /abs/or/rel/path/to/xxx.pt
-    2) --ckpt best
-    3) --ckpt last
-    """
-    p = Path(ckpt_arg)
-    if p.suffix == ".pt":
-        return p
-
-    alias = ckpt_arg.lower().strip()
-    if alias not in {"best", "last"}:
-        raise ValueError(f"Unsupported --ckpt value: {ckpt_arg}. Use path/*.pt or alias best|last.")
-
-    cfg = load_config(config_path)
-    out_dir = Path(cfg.log["out_dir"]) / split
-    return out_dir / f"{alias}.pt"
+from src.utils.config import load_config
+from src.data.datasets import build_dataloaders
+from src.models.seg_model import HybridUNet
+from src.utils.metrics import compute_binary_metrics
 
 
-def _load_model_from_ckpt(cfg: dict, ckpt_path: Path, source: str):
-    dim = 3 if cfg.data.get("dim", "3d") == "3d" else 2
+def load_model(cfg, ckpt_path):
 
     model = HybridUNet(
-        in_channels=int(cfg.model["in_channels"]),
-        out_channels=int(cfg.model["out_channels"]),
-        channels=tuple(cfg.model["channels"]),
-        dim=dim,
-        use_transformer=bool(cfg.model.get("use_transformer", True)),
+        in_channels=cfg.model["in_channels"],
+        out_channels=cfg.model["out_channels"]
     )
 
-    ckpt = torch.load(str(ckpt_path), map_location="cpu")
+    ckpt = torch.load(ckpt_path, map_location="cpu")
+    model.load_state_dict(ckpt["student"], strict=True)
 
-    # 优先按 source 加载；若不存在则回退
-    if source == "student":
-        key = "student"
-    elif source == "teacher":
-        key = "teacher"
-    elif source == "ensemble":
-        key = "student"  # ensemble会在trainer.evaluate里用teacher+student
-    else:
-        raise ValueError(f"Invalid source: {source}")
-
-    if key in ckpt:
-        model.load_state_dict(ckpt[key], strict=False)
-    else:
-        # 兼容仅保存裸state_dict的情况
-        model.load_state_dict(ckpt, strict=False)
-
-    return model, ckpt
+    return model
 
 
+@torch.no_grad()
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True, help="Path to yaml config")
-    parser.add_argument(
-        "--ckpt",
-        type=str,
-        default="best",
-        help="Checkpoint path (*.pt) OR alias {best,last}. Default: best",
-    )
-    parser.add_argument(
-        "--source",
-        type=str,
-        default="teacher",
-        choices=["teacher", "student", "ensemble"],
-        help="Which source to evaluate",
-    )
-    parser.add_argument("--split", type=str, default="seed_0", help="When ckpt is alias, use this run split dir")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--save-json", type=str, default="", help="optional output json path")
-    args = parser.parse_args()
 
-    cfg = load_config(args.config)
-    set_seed(args.seed)
+    cfg = load_config("src/configs/brats_group_e.yaml")
 
-    ckpt_path = _resolve_ckpt(args.ckpt, args.config, split=args.split)
-    if not ckpt_path.exists():
-        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+    loaders = build_dataloaders(cfg.data)
 
-    model, _ = _load_model_from_ckpt(cfg, ckpt_path, source=args.source)
+    ckpt_path = cfg.log["out_dir"] + "/best.pt"
 
-    loaders = build_dataloaders(cfg["data"])
-    trainer = MeanTeacherTrainer(model, cfg)
+    model = load_model(cfg, ckpt_path)
+    model.eval()
 
-    # 若source是teacher，尝试恢复teacher权重
-    ckpt = torch.load(str(ckpt_path), map_location="cpu")
-    if "teacher" in ckpt:
-        trainer.teacher.load_state_dict(ckpt["teacher"], strict=False)
-    if "student" in ckpt:
-        trainer.student.load_state_dict(ckpt["student"], strict=False)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
 
-    metrics = trainer.evaluate(
-        loaders["val"],
-        use_teacher_ema=(args.source == "teacher"),
-        use_ensemble=(args.source == "ensemble"),
-    )
+    metrics_sum = None
+    n = 0
 
-    result = {
-        "ckpt": str(ckpt_path),
-        "source": args.source,
-        "dice": float(metrics.dice),
-        "iou": float(metrics.iou),
-        "precision": float(metrics.precision),
-        "recall": float(metrics.recall),
-        "f1": float(metrics.f1),
-        "minority_f1": float(metrics.minority_f1),
-        "hd95": float(metrics.hd95),
-    }
+    roi = tuple(cfg.data.get("spatial_size", [96, 96, 96]))
 
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    for batch in loaders["val"]:
 
-    if args.save_json:
-        outp = Path(args.save_json)
-        outp.parent.mkdir(parents=True, exist_ok=True)
-        outp.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        x = batch["image"].to(device)
+        y = batch["label"].to(device)
+
+        logits = sliding_window_inference(
+            x,
+            roi_size=roi,
+            sw_batch_size=1,
+            predictor=model
+        )
+
+        m = compute_binary_metrics(
+            logits,
+            y,
+            threshold=cfg.inference.get("threshold", 0.45)
+        )
+
+        if metrics_sum is None:
+            metrics_sum = {k: 0.0 for k in m.__dict__.keys()}
+
+        for k in metrics_sum:
+            metrics_sum[k] += getattr(m, k)
+
+        n += 1
+
+    for k in metrics_sum:
+        metrics_sum[k] /= max(1, n)
+
+    print("\n===== FINAL EVALUATION =====")
+    for k, v in metrics_sum.items():
+        print(f"{k}: {v:.4f}")
 
 
 if __name__ == "__main__":
