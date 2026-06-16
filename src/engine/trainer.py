@@ -20,7 +20,7 @@ from src.utils.metrics import compute_binary_metrics
 @torch.no_grad()
 def update_ema(student, teacher, base_m=0.99):
     for t, s in zip(teacher.parameters(), student.parameters()):
-        t.data.mul_(base_m).add_(s.data * (1 - base_m))
+        t.data.mul_(base_m).add_(s.data.detach() * (1 - base_m))
 
 
 class MeanTeacherTrainer:
@@ -89,7 +89,7 @@ class MeanTeacherTrainer:
 
                 update_ema(self.student, self.teacher)
 
-                pbar.set_postfix(loss=float(loss))
+                pbar.set_postfix(loss=loss.detach().float().item())
 
             self.scheduler.step()
 
@@ -110,7 +110,7 @@ class MeanTeacherTrainer:
 
                 m = compute_binary_metrics(logits, y)
 
-                dice_sum += m.dice
+                dice_sum += float(m.dice)
                 n += 1
 
             dice = dice_sum / max(1, n)
