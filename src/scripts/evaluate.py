@@ -1,3 +1,4 @@
+import os
 import torch
 from monai.inferers import sliding_window_inference
 
@@ -7,11 +8,29 @@ from src.models.seg_model import HybridUNet
 from src.utils.metrics import compute_binary_metrics
 
 
+def find_ckpt(base_dir):
+
+    candidates = [
+        os.path.join(base_dir, "best.pt"),
+        os.path.join(base_dir, "last.pt"),
+    ]
+
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+
+    raise FileNotFoundError(
+        f"No checkpoint found in {base_dir}. "
+        f"Expected best.pt or last.pt"
+    )
+
+
 def load_model(cfg, ckpt_path):
 
     model = HybridUNet(
         in_channels=cfg.model["in_channels"],
-        out_channels=cfg.model["out_channels"]
+        out_channels=cfg.model["out_channels"],
+        channels=cfg.model.get("channels", [32, 64, 128, 256]),
     )
 
     ckpt = torch.load(ckpt_path, map_location="cpu")
@@ -27,18 +46,22 @@ def main():
 
     loaders = build_dataloaders(cfg.data)
 
-    ckpt_path = cfg.log["out_dir"] + "/best.pt"
+    base_dir = cfg.log["out_dir"]
+
+    ckpt_path = find_ckpt(base_dir)
+
+    print(f"[CKPT] using: {ckpt_path}")
 
     model = load_model(cfg, ckpt_path)
-    model.eval()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-
-    metrics_sum = None
-    n = 0
+    model.eval()
 
     roi = tuple(cfg.data.get("spatial_size", [96, 96, 96]))
+
+    metric_sum = None
+    n = 0
 
     for batch in loaders["val"]:
 
@@ -52,25 +75,21 @@ def main():
             predictor=model
         )
 
-        m = compute_binary_metrics(
-            logits,
-            y,
-            threshold=cfg.inference.get("threshold", 0.45)
-        )
+        m = compute_binary_metrics(logits, y)
 
-        if metrics_sum is None:
-            metrics_sum = {k: 0.0 for k in m.__dict__.keys()}
+        if metric_sum is None:
+            metric_sum = {k: 0.0 for k in m.__dict__.keys()}
 
-        for k in metrics_sum:
-            metrics_sum[k] += getattr(m, k)
+        for k in metric_sum:
+            metric_sum[k] += float(getattr(m, k))
 
         n += 1
 
-    for k in metrics_sum:
-        metrics_sum[k] /= max(1, n)
+    for k in metric_sum:
+        metric_sum[k] /= max(1, n)
 
-    print("\n===== FINAL EVALUATION =====")
-    for k, v in metrics_sum.items():
+    print("\n===== FINAL RESULT =====")
+    for k, v in metric_sum.items():
         print(f"{k}: {v:.4f}")
 
 
