@@ -1,32 +1,57 @@
+from __future__ import annotations
+
 import torch
 import torch.nn.functional as F
 
 
-def prototype_contrast_loss(feats, masks, temperature=0.1):
+def prototype_contrast_loss(
+    feat: torch.Tensor,
+    mask: torch.Tensor,
+):
     """
-    class-wise prototype contrastive loss
+    Memory-safe prototype contrastive loss
+
+    feat:
+        B,C,D,H,W
+
+    mask:
+        B,1,D,H,W
     """
 
-    b, c, *spatial = feats.shape
-    feats = feats.view(b, c, -1).permute(0, 2, 1)  # B,N,C
-    masks = masks.view(b, -1)
+    B, C = feat.shape[:2]
+
+    feat = F.normalize(feat, dim=1)
 
     loss = 0.0
+    valid = 0
 
-    for i in range(b):
-        f = feats[i]
-        m = masks[i]
+    for b in range(B):
 
-        pos = f[m > 0.5]
-        neg = f[m <= 0.5]
+        f = feat[b]
 
-        if len(pos) == 0 or len(neg) == 0:
+        m = (mask[b] > 0.5)
+
+        if m.sum() < 10:
             continue
 
-        pos_mean = pos.mean(0, keepdim=True)
-        neg_mean = neg.mean(0, keepdim=True)
+        fg_proto = f[:, m.squeeze(0)].mean(dim=1)
 
-        sim = F.cosine_similarity(pos_mean, neg_mean)
-        loss += torch.relu(sim)
+        bg_proto = f[:, (~m).squeeze(0)].mean(dim=1)
 
-    return loss / max(b, 1)
+        fg_proto = F.normalize(fg_proto, dim=0)
+        bg_proto = F.normalize(bg_proto, dim=0)
+
+        sim = (fg_proto * bg_proto).sum()
+
+        loss += sim
+
+        valid += 1
+
+    if valid == 0:
+        return torch.tensor(
+            0.0,
+            device=feat.device,
+            requires_grad=True,
+        )
+
+    return loss / valid

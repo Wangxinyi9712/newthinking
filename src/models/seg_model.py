@@ -1,30 +1,68 @@
 import torch
 import torch.nn as nn
-from .modules import *
+
+
+class ConvBlock(nn.Module):
+    def __init__(self, cin, cout):
+        super().__init__()
+
+        self.net = nn.Sequential(
+            nn.Conv3d(cin, cout, 3, padding=1),
+            nn.InstanceNorm3d(cout),
+            nn.LeakyReLU(inplace=True),
+
+            nn.Conv3d(cout, cout, 3, padding=1),
+            nn.InstanceNorm3d(cout),
+            nn.LeakyReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.net(x)
 
 
 class HybridUNet(nn.Module):
-
-    def __init__(self, in_channels=4, out_channels=1, channels=[32, 64, 128, 256]):
+    def __init__(self, in_channels=4, out_channels=1, channels=(16, 32, 64, 128)):
         super().__init__()
 
-        self.enc1 = nn.Conv3d(in_channels, channels[0], 3, padding=1)
-        self.enc2 = nn.Conv3d(channels[0], channels[1], 3, padding=1)
-        self.enc3 = nn.Conv3d(channels[1], channels[2], 3, padding=1)
+        c1, c2, c3, c4 = channels
 
-        self.decoder = nn.Conv3d(channels[2], out_channels, 1)
+        self.pool = nn.MaxPool3d(2)
 
-        self.feature_proj = nn.Conv3d(channels[2], 64, 1)
+        self.enc1 = ConvBlock(in_channels, c1)
+        self.enc2 = ConvBlock(c1, c2)
+        self.enc3 = ConvBlock(c2, c3)
+        self.enc4 = ConvBlock(c3, c4)
+
+        self.up3 = nn.ConvTranspose3d(c4, c3, 2, stride=2)
+        self.dec3 = ConvBlock(c3 * 2, c3)
+
+        self.up2 = nn.ConvTranspose3d(c3, c2, 2, stride=2)
+        self.dec2 = ConvBlock(c2 * 2, c2)
+
+        self.up1 = nn.ConvTranspose3d(c2, c1, 2, stride=2)
+        self.dec1 = ConvBlock(c1 * 2, c1)
+
+        self.head = nn.Conv3d(c1, out_channels, 1)
 
     def forward(self, x, return_features=False):
 
-        x1 = torch.relu(self.enc1(x))
-        x2 = torch.relu(self.enc2(x1))
-        feat = torch.relu(self.enc3(x2))
+        x1 = self.enc1(x)
+        x2 = self.enc2(self.pool(x1))
+        x3 = self.enc3(self.pool(x2))
+        x4 = self.enc4(self.pool(x3))
 
-        out = self.decoder(feat)
+        d3 = self.up3(x4)
+        d3 = self.dec3(torch.cat([d3, x3], dim=1))
+
+        d2 = self.up2(d3)
+        d2 = self.dec2(torch.cat([d2, x2], dim=1))
+
+        d1 = self.up1(d2)
+        d1 = self.dec1(torch.cat([d1, x1], dim=1))
+
+        out = self.head(d1)
 
         if return_features:
-            return out, self.feature_proj(feat)
+            return out, d1
 
         return out
