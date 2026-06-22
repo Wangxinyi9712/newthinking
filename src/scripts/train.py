@@ -1,53 +1,33 @@
-from __future__ import annotations
-
-import os
-import torch
-
 from src.utils.config import load_config
-from src.utils.seed import set_seed
 from src.data.datasets import build_dataloaders
 from src.models.seg_model import HybridUNet
 from src.engine.trainer import MeanTeacherTrainer
-
-
-def _build_model(cfg):
-    return HybridUNet(
-        in_channels=cfg.model["in_channels"],
-        out_channels=cfg.model["out_channels"],
-        channels=cfg.model.get("channels", [32, 64, 128, 256]),
-        use_transformer=cfg.model.get("use_transformer", True),
-    )
+from src.utils.seed import set_seed
 
 
 def main():
 
     cfg = load_config("src/configs/brats_group_e.yaml")
 
-    seeds = cfg.train.get("seed", [0])
+    set_seed(cfg.train.get("seed", [0])[0])
 
-    # ✔ FIX: remove seed-level folder for checkpoint consistency
-    base_out = cfg.log["out_dir"]
+    loaders = build_dataloaders(cfg.data)
 
-    for seed in seeds:
+    model = HybridUNet(
+        in_channels=cfg.model["in_channels"],
+        out_channels=cfg.model["out_channels"],
+        channels=cfg.model.get("channels", [32, 64, 128, 256])
+    )
 
-        set_seed(seed)
+    trainer = MeanTeacherTrainer(model, cfg)
 
-        run_dir = base_out  # ✔ unified path
+    for epoch in range(cfg.train["epochs"]):
 
-        os.makedirs(run_dir, exist_ok=True)
+        for batch_l, batch_u in zip(loaders["labeled"], loaders["unlabeled"]):
 
-        loaders = build_dataloaders(cfg.data)
+            loss = trainer.train_step(batch_l, batch_u)
 
-        model = _build_model(cfg)
-
-        trainer = MeanTeacherTrainer(model, cfg)
-
-        trainer.fit(
-            loaders=loaders,
-            out_dir=run_dir
-        )
-
-        print(f"[DONE] seed={seed}, saved to {run_dir}")
+        print("epoch:", epoch, "loss:", loss)
 
 
 if __name__ == "__main__":
