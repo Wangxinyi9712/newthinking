@@ -1,19 +1,43 @@
 import torch
 
 
-def frequency_filter(logits, threshold=0.6):
-    """
-    FFT-based pseudo label filtering
-    remove high-frequency noise
-    """
+def frequency_filter(x, mode="lowpass"):
 
-    prob = torch.sigmoid(logits)
+    # -------------------------
+    # 1. 保证稳定输入
+    # -------------------------
+    if x.dtype != torch.float32:
+        x = x.float()
 
-    fft = torch.fft.fftn(prob, dim=tuple(range(2, prob.ndim)))
+    x = x.detach()
+
+    # -------------------------
+    # 2. FFT in FP32 ONLY
+    # -------------------------
+    fft = torch.fft.fftn(x, dim=(2, 3, 4))
     amp = torch.abs(fft)
 
-    mask = amp < amp.mean() * threshold
+    # -------------------------
+    # 3. low-frequency mask（stable version）
+    # -------------------------
+    b, c, d, h, w = amp.shape
 
-    filtered = torch.fft.ifftn(fft * mask, dim=tuple(range(2, prob.ndim))).real
+    mask = torch.zeros_like(amp)
 
-    return filtered.clamp(0, 1)
+    kd = d // 4
+    kh = h // 4
+    kw = w // 4
+
+    mask[:, :, :kd, :kh, :kw] = 1.0
+
+    amp = amp * mask
+
+    # -------------------------
+    # 4. reconstruction safe path
+    # -------------------------
+    phase = torch.angle(fft)
+    fft_filtered = torch.polar(amp, phase)
+
+    out = torch.fft.ifftn(fft_filtered, dim=(2, 3, 4)).real
+
+    return out

@@ -4,6 +4,16 @@ from src.models.seg_model import HybridUNet
 from src.engine.trainer import MeanTeacherTrainer
 from src.utils.seed import set_seed
 
+def _build_model(cfg):
+
+    model = HybridUNet(
+        in_channels=cfg.model.get("in_channels", 4),
+        out_channels=cfg.model.get("out_channels", 1),
+        channels=cfg.model.get("channels", [16, 32, 64, 128]),
+        use_transformer=cfg.model.get("use_transformer", False),
+    )
+
+    return model
 
 def main():
 
@@ -13,11 +23,7 @@ def main():
 
     loaders = build_dataloaders(cfg.data)
 
-    model = HybridUNet(
-        in_channels=cfg.model["in_channels"],
-        out_channels=cfg.model["out_channels"],
-        channels=cfg.model.get("channels", [32, 64, 128, 256])
-    )
+    model = _build_model(cfg)
 
     trainer = MeanTeacherTrainer(model, cfg)
 

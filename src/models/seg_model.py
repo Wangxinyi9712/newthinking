@@ -1,12 +1,14 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class ConvBlock(nn.Module):
+
     def __init__(self, cin, cout):
         super().__init__()
 
-        self.net = nn.Sequential(
+        self.block = nn.Sequential(
             nn.Conv3d(cin, cout, 3, padding=1),
             nn.InstanceNorm3d(cout),
             nn.LeakyReLU(inplace=True),
@@ -17,11 +19,19 @@ class ConvBlock(nn.Module):
         )
 
     def forward(self, x):
-        return self.net(x)
+        return self.block(x)
 
 
 class HybridUNet(nn.Module):
-    def __init__(self, in_channels=4, out_channels=1, channels=(16, 32, 64, 128)):
+
+    # ✅ IMPORTANT: restore full init signature
+    def __init__(
+        self,
+        in_channels=4,
+        out_channels=1,
+        channels=(16, 32, 64, 128),
+        use_transformer=False
+    ):
         super().__init__()
 
         c1, c2, c3, c4 = channels
@@ -34,16 +44,17 @@ class HybridUNet(nn.Module):
         self.enc4 = ConvBlock(c3, c4)
 
         self.up3 = nn.ConvTranspose3d(c4, c3, 2, stride=2)
-        self.dec3 = ConvBlock(c3 * 2, c3)
+        self.dec3 = ConvBlock(c3 + c3, c3)
 
         self.up2 = nn.ConvTranspose3d(c3, c2, 2, stride=2)
-        self.dec2 = ConvBlock(c2 * 2, c2)
+        self.dec2 = ConvBlock(c2 + c2, c2)
 
         self.up1 = nn.ConvTranspose3d(c2, c1, 2, stride=2)
-        self.dec1 = ConvBlock(c1 * 2, c1)
+        self.dec1 = ConvBlock(c1 + c1, c1)
 
-        self.head = nn.Conv3d(c1, out_channels, 1)
+        self.seg_head = nn.Conv3d(c1, out_channels, 1)
 
+    # forward（stable version）
     def forward(self, x, return_features=False):
 
         x1 = self.enc1(x)
@@ -52,17 +63,21 @@ class HybridUNet(nn.Module):
         x4 = self.enc4(self.pool(x3))
 
         d3 = self.up3(x4)
+        d3 = F.interpolate(d3, size=x3.shape[2:], mode="trilinear", align_corners=False)
         d3 = self.dec3(torch.cat([d3, x3], dim=1))
 
         d2 = self.up2(d3)
+        d2 = F.interpolate(d2, size=x2.shape[2:], mode="trilinear", align_corners=False)
         d2 = self.dec2(torch.cat([d2, x2], dim=1))
 
         d1 = self.up1(d2)
+        d1 = F.interpolate(d1, size=x1.shape[2:], mode="trilinear", align_corners=False)
         d1 = self.dec1(torch.cat([d1, x1], dim=1))
 
-        out = self.head(d1)
+        logits = self.seg_head(d1)
 
         if return_features:
-            return out, d1
+            feat = F.adaptive_avg_pool3d(d1, 1).flatten(1)
+            return logits, feat
 
-        return out
+        return logits

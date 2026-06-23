@@ -3,6 +3,7 @@ data:
   dim: 3d
   split_file: data_splits/brats_split.json
   spatial_size: [96, 96, 96]
+  crop_size: [ 96, 96, 96 ]
   batch_size: 1
   num_workers: 2
   pin_memory: false
@@ -11,28 +12,15 @@ model:
   in_channels: 4
   out_channels: 1
   channels: [16, 32, 64, 128]
-  use_transformer: false
 
 train:
   lr: 1e-4
   epochs: 200
   ema_momentum: 0.99
-  use_amp: true
-  grad_accum_steps: 2
-  grad_clip: 1.0
-  seed: [0]
+  amp: true
 
 loss:
-  lambda_ssl: 1.0
-  lambda_proto: 0.2
-  lambda_spectral: 0.1
-  lambda_consistency: 0.2
-  teacher_temperature: 1.5
-  tau: 0.65
-
-inference:
-  threshold: 0.5
-  use_teacher: true
-
-log:
-  out_dir: runs/brats_group_e
+  lambda_proto: 0.05
+  lambda_spec: 0.1
+  lambda_unsup: 1.0
+  lambda_sup: 1.0

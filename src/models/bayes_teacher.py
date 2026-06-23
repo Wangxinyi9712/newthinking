@@ -1,33 +1,28 @@
 import torch
 import torch.nn as nn
-import copy
 import torch.nn.functional as F
 
 
 class BayesianTeacher(nn.Module):
-    """
-    Uncertainty-aware teacher:
-    - forward returns mean + variance (MC dropout style)
-    """
 
-    def __init__(self, model: nn.Module, mc_samples: int = 4):
+    def __init__(self, model):
         super().__init__()
-        self.model = copy.deepcopy(model)
-        self.mc_samples = mc_samples
+        self.model = model
+        self.model.eval()
 
-    @torch.no_grad()
-    def forward(self, x):
-        self.model.train()  # MC dropout style
+    def forward(self, x, T=5):
 
         preds = []
-        for _ in range(self.mc_samples):
-            logits = self.model(x)
-            if isinstance(logits, tuple):
-                logits = logits[0]
-            preds.append(torch.sigmoid(logits))
 
-        preds = torch.stack(preds, dim=0)
-        mean = preds.mean(dim=0)
-        var = preds.var(dim=0)
+        for _ in range(T):
+            self.model.train()  # dropout enable
+            with torch.no_grad():
+                out = torch.sigmoid(self.model(x))
+                preds.append(out)
+
+        preds = torch.stack(preds)
+
+        mean = preds.mean(0)
+        var = preds.var(0)
 
         return mean, var
