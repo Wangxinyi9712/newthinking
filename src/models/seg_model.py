@@ -44,13 +44,9 @@ class HybridUNet(nn.Module):
         self.seg_head = nn.Conv3d(c1, out_channels, 1)
         self.feat_head = nn.Conv3d(c1, 128, 1)
 
-    def _align(self, x, ref):
+    def align(self, x, ref):
         if x.shape[2:] != ref.shape[2:]:
-            x = F.interpolate(
-                x, size=ref.shape[2:],
-                mode="trilinear",
-                align_corners=False
-            )
+            x = F.interpolate(x, size=ref.shape[2:], mode="trilinear", align_corners=False)
         return x
 
     def forward(self, x):
@@ -60,13 +56,13 @@ class HybridUNet(nn.Module):
         x3 = self.enc3(self.pool(x2))
         x4 = self.enc4(self.pool(x3))
 
-        d3 = self._align(self.up3(x4), x3)
+        d3 = self.align(self.up3(x4), x3)
         d3 = self.dec3(torch.cat([d3, x3], dim=1))
 
-        d2 = self._align(self.up2(d3), x2)
+        d2 = self.align(self.up2(d3), x2)
         d2 = self.dec2(torch.cat([d2, x2], dim=1))
 
-        d1 = self._align(self.up1(d2), x1)
+        d1 = self.align(self.up1(d2), x1)
         d1 = self.dec1(torch.cat([d1, x1], dim=1))
 
         logits = self.seg_head(d1)

@@ -41,14 +41,20 @@ class MeanTeacherTrainer:
             with torch.no_grad():
                 t_u, _ = self.teacher(x_u)
 
-            pseudo = torch.sigmoid(t_u).float()
+            pseudo = torch.sigmoid(t_u).float().detach()
 
-            pseudo = frequency_filter(pseudo.float())
+            pseudo = frequency_filter(pseudo)
 
             loss_sup = supervised_loss(s_l, y_l)
             loss_unsup = unsupervised_loss(s_u, pseudo)
             loss_spec = spectral_consistency_loss(s_u, t_u)
-            loss_proto = prototype_contrast_loss(f_l, y_l, self.memory)
+
+            # 🔥 FIX: prototype must use detached feature
+            loss_proto = prototype_contrast_loss(
+                f_l.detach(),
+                y_l.detach(),
+                self.memory
+            )
 
             loss = (
                 loss_sup +
