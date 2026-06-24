@@ -34,7 +34,7 @@ class MeanTeacherTrainer:
         y_l = batch_l["label"].cuda()
         x_u = batch_u["image"].cuda()
 
-        with autocast("cuda"):
+        with autocast("cuda", enabled=True):
 
             s_l, f_l = self.student(x_l)
             s_u, f_u = self.student(x_u)
@@ -42,16 +42,26 @@ class MeanTeacherTrainer:
             with torch.no_grad():
                 t_u, _ = self.teacher(x_u)
 
-            pseudo = torch.sigmoid(t_u)
+            pseudo = torch.sigmoid(t_u).float()
 
-            pseudo = frequency_filter(pseudo.float())
+            pseudo = frequency_filter(pseudo)
 
             loss_sup = supervised_loss(s_l, y_l)
             loss_unsup = unsupervised_loss(s_u, pseudo)
-            loss_spec = spectral_consistency_loss(s_u.float(), t_u.float())
+
+            loss_spec = spectral_consistency_loss(
+                s_u.float(),
+                t_u.float()
+            )
+
             loss_proto = prototype_contrast_loss(f_l, y_l, self.memory)
 
-            loss = loss_sup + 0.5*loss_unsup + 0.1*loss_spec + 0.1*loss_proto
+            loss = (
+                loss_sup +
+                0.5 * loss_unsup +
+                0.1 * loss_spec +
+                0.1 * loss_proto
+            )
 
         self.scaler.scale(loss).backward()
         self.scaler.step(self.opt)
