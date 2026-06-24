@@ -14,7 +14,6 @@ class MeanTeacherTrainer:
         self.student = model.cuda()
         self.teacher = model.cuda()
         self.teacher.load_state_dict(self.student.state_dict())
-
         self.teacher.eval()
 
         self.opt = Adam(self.student.parameters(), lr=1e-4)
@@ -34,6 +33,7 @@ class MeanTeacherTrainer:
         y_l = batch_l["label"].cuda()
         x_u = batch_u["image"].cuda()
 
+        # ❗ AMP only forward safe
         with autocast("cuda", enabled=True):
 
             s_l, f_l = self.student(x_l)
@@ -44,16 +44,12 @@ class MeanTeacherTrainer:
 
             pseudo = torch.sigmoid(t_u).float()
 
-            pseudo = frequency_filter(pseudo)
+            # ❗ FFT must be float32 safe
+            pseudo = frequency_filter(pseudo.float())
 
             loss_sup = supervised_loss(s_l, y_l)
             loss_unsup = unsupervised_loss(s_u, pseudo)
-
-            loss_spec = spectral_consistency_loss(
-                s_u.float(),
-                t_u.float()
-            )
-
+            loss_spec = spectral_consistency_loss(s_u, t_u)
             loss_proto = prototype_contrast_loss(f_l, y_l, self.memory)
 
             loss = (

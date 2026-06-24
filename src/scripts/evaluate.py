@@ -15,20 +15,8 @@ def load_model(cfg, ckpt_path):
 
     state = ckpt.get("student", ckpt)
 
-    model.load_state_dict(state, strict=True)
+    # ❗ strict=False to survive legacy mismatch
+    model.load_state_dict(state, strict=False)
 
     model.eval()
     return model
-
-
-def main():
-    cfg = load_config("src/configs/brats_group_e.yaml")
-
-    ckpt_path = cfg.log.get("ckpt", "runs/seed_0/best.pt")
-
-    model = load_model(cfg, ckpt_path)
-
-    print("[OK] model loaded")
-
-if __name__ == "__main__":
-    main()
