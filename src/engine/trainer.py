@@ -3,6 +3,7 @@ from torch.optim import Adam
 from torch.amp import autocast, GradScaler
 
 from src.losses.seg_losses import *
+from src.losses.contrastive import prototype_contrast_loss
 from src.utils.frequency import frequency_filter
 
 
@@ -12,7 +13,6 @@ class MeanTeacherTrainer:
 
         self.student = model.cuda()
         self.teacher = model.cuda()
-
         self.teacher.load_state_dict(self.student.state_dict())
         self.teacher.eval()
 
@@ -21,9 +21,10 @@ class MeanTeacherTrainer:
 
         self.ema = 0.99
 
+        self.memory = {}
+
     @torch.no_grad()
     def update_teacher(self):
-
         for t, s in zip(self.teacher.parameters(), self.student.parameters()):
             t.data = self.ema * t.data + (1 - self.ema) * s.data
 
@@ -43,11 +44,13 @@ class MeanTeacherTrainer:
 
             pseudo = frequency_filter(torch.sigmoid(t_u))
 
-            loss = (
-                supervised_loss(s_l, y_l) +
-                0.5 * unsupervised_loss(s_u, pseudo) +
-                0.1 * spectral_consistency_loss(s_u, t_u)
-            )
+            loss_sup = supervised_loss(s_l, y_l)
+            loss_unsup = unsupervised_loss(s_u, pseudo)
+            loss_spec = spectral_consistency_loss(s_u, t_u)
+
+            loss_proto = prototype_contrast_loss(feat_l, y_l, self.memory)
+
+            loss = loss_sup + 0.5 * loss_unsup + 0.1 * loss_spec + 0.1 * loss_proto
 
         self.scaler.scale(loss).backward()
         self.scaler.step(self.opt)

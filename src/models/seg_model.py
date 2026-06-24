@@ -4,29 +4,29 @@ import torch.nn.functional as F
 
 
 class ConvBlock(nn.Module):
-    def __init__(self, cin, cout):
+    def __init__(self, c_in, c_out):
         super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv3d(cin, cout, 3, padding=1),
-            nn.InstanceNorm3d(cout),
+        self.net = nn.Sequential(
+            nn.Conv3d(c_in, c_out, 3, padding=1),
+            nn.InstanceNorm3d(c_out),
             nn.LeakyReLU(inplace=True),
-            nn.Conv3d(cout, cout, 3, padding=1),
-            nn.InstanceNorm3d(cout),
+            nn.Conv3d(c_out, c_out, 3, padding=1),
+            nn.InstanceNorm3d(c_out),
             nn.LeakyReLU(inplace=True),
         )
 
     def forward(self, x):
-        return self.block(x)
+        return self.net(x)
 
 
 class HybridUNet(nn.Module):
 
-    def __init__(self, in_channels=4, out_channels=1, channels=(16, 32, 64, 128)):
+    def __init__(self, in_channels=4, out_channels=1, channels=(32, 64, 128, 256)):
         super().__init__()
 
         c1, c2, c3, c4 = channels
 
-        self.pool = nn.MaxPool3d(2)
+        self.pool = nn.MaxPool3d(2, ceil_mode=True)
 
         self.enc1 = ConvBlock(in_channels, c1)
         self.enc2 = ConvBlock(c1, c2)
@@ -43,9 +43,10 @@ class HybridUNet(nn.Module):
         self.dec1 = ConvBlock(c1 * 2, c1)
 
         self.seg_head = nn.Conv3d(c1, out_channels, 1)
-        self.proj = nn.Conv3d(c1, 128, 1)
 
-    def _align(self, x, ref):
+        self.feature_proj = nn.Conv3d(c1, 128, 1)
+
+    def align(self, x, ref):
         return F.interpolate(x, size=ref.shape[2:], mode="trilinear", align_corners=False)
 
     def forward(self, x, return_features=False):
@@ -55,18 +56,18 @@ class HybridUNet(nn.Module):
         x3 = self.enc3(self.pool(x2))
         x4 = self.enc4(self.pool(x3))
 
-        d3 = self._align(self.up3(x4), x3)
+        d3 = self.align(self.up3(x4), x3)
         d3 = self.dec3(torch.cat([d3, x3], dim=1))
 
-        d2 = self._align(self.up2(d3), x2)
+        d2 = self.align(self.up2(d3), x2)
         d2 = self.dec2(torch.cat([d2, x2], dim=1))
 
-        d1 = self._align(self.up1(d2), x1)
+        d1 = self.align(self.up1(d2), x1)
         d1 = self.dec1(torch.cat([d1, x1], dim=1))
 
         logits = self.seg_head(d1)
 
         if return_features:
-            return logits, self.proj(d1)
+            return logits, self.feature_proj(d1)
 
         return logits

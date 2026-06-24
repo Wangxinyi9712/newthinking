@@ -1,21 +1,33 @@
 import torch
+import torch.nn.functional as F
 
 
-def frequency_filter(x):
+def prototype_contrast_loss(feat, mask, memory, num_classes=2):
 
-    x = x.float().detach()
+    # feat: [B,C,D,H,W]
+    B, C, D, H, W = feat.shape
 
-    fft = torch.fft.fftn(x, dim=(2, 3, 4))
-    amp = torch.abs(fft)
+    loss = 0.0
 
-    b, c, d, h, w = amp.shape
+    feat_flat = feat.permute(0,2,3,4,1).reshape(-1, C)
+    mask_flat = mask.view(-1)
 
-    mask = torch.zeros_like(amp)
-    mask[:, :, : d // 4, : h // 4, : w // 4] = 1.0
+    for c in range(num_classes):
 
-    amp = amp * mask
+        idx = (mask_flat == c)
 
-    phase = torch.angle(fft)
-    fft = torch.polar(amp, phase)
+        if idx.sum() == 0:
+            continue
 
-    return torch.fft.ifftn(fft, dim=(2, 3, 4)).real
+        pos = feat_flat[idx]
+
+        proto = pos.mean(dim=0)
+
+        if c in memory:
+            proto = 0.9 * memory[c] + 0.1 * proto
+
+        memory[c] = proto.detach()
+
+        loss += (1 - F.cosine_similarity(pos, proto.unsqueeze(0), dim=1)).mean()
+
+    return loss
