@@ -4,14 +4,14 @@ import torch.nn.functional as F
 
 
 class ConvBlock(nn.Module):
-    def __init__(self, c_in, c_out):
+    def __init__(self, cin, cout):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv3d(c_in, c_out, 3, padding=1),
-            nn.InstanceNorm3d(c_out),
+            nn.Conv3d(cin, cout, 3, padding=1),
+            nn.InstanceNorm3d(cout),
             nn.LeakyReLU(inplace=True),
-            nn.Conv3d(c_out, c_out, 3, padding=1),
-            nn.InstanceNorm3d(c_out),
+            nn.Conv3d(cout, cout, 3, padding=1),
+            nn.InstanceNorm3d(cout),
             nn.LeakyReLU(inplace=True),
         )
 
@@ -34,22 +34,23 @@ class HybridUNet(nn.Module):
         self.enc4 = ConvBlock(c3, c4)
 
         self.up3 = nn.ConvTranspose3d(c4, c3, 2, stride=2)
-        self.dec3 = ConvBlock(c3 * 2, c3)
-
         self.up2 = nn.ConvTranspose3d(c3, c2, 2, stride=2)
-        self.dec2 = ConvBlock(c2 * 2, c2)
-
         self.up1 = nn.ConvTranspose3d(c2, c1, 2, stride=2)
-        self.dec1 = ConvBlock(c1 * 2, c1)
+
+        self.dec3 = ConvBlock(c3 + c3, c3)
+        self.dec2 = ConvBlock(c2 + c2, c2)
+        self.dec1 = ConvBlock(c1 + c1, c1)
 
         self.seg_head = nn.Conv3d(c1, out_channels, 1)
 
-        self.feature_proj = nn.Conv3d(c1, 128, 1)
+        self.feat_proj = nn.Conv3d(c1, 128, 1)
 
     def align(self, x, ref):
-        return F.interpolate(x, size=ref.shape[2:], mode="trilinear", align_corners=False)
+        if x.shape[2:] != ref.shape[2:]:
+            x = F.interpolate(x, size=ref.shape[2:], mode="trilinear", align_corners=False)
+        return x
 
-    def forward(self, x, return_features=False):
+    def forward(self, x):
 
         x1 = self.enc1(x)
         x2 = self.enc2(self.pool(x1))
@@ -67,7 +68,6 @@ class HybridUNet(nn.Module):
 
         logits = self.seg_head(d1)
 
-        if return_features:
-            return logits, self.feature_proj(d1)
+        features = self.feat_proj(d1)
 
-        return logits
+        return logits, features

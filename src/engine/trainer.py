@@ -14,19 +14,19 @@ class MeanTeacherTrainer:
         self.student = model.cuda()
         self.teacher = model.cuda()
         self.teacher.load_state_dict(self.student.state_dict())
+
         self.teacher.eval()
 
         self.opt = Adam(self.student.parameters(), lr=1e-4)
         self.scaler = GradScaler("cuda")
 
         self.ema = 0.99
-
         self.memory = {}
 
     @torch.no_grad()
     def update_teacher(self):
         for t, s in zip(self.teacher.parameters(), self.student.parameters()):
-            t.data = self.ema * t.data + (1 - self.ema) * s.data
+            t.data.mul_(self.ema).add_(s.data, alpha=1 - self.ema)
 
     def train_step(self, batch_l, batch_u):
 
@@ -36,13 +36,15 @@ class MeanTeacherTrainer:
 
         with autocast("cuda"):
 
-            s_l, feat_l = self.student(x_l, return_features=True)
-            s_u, feat_u = self.student(x_u, return_features=True)
+            s_l, feat_l = self.student(x_l)
+            s_u, feat_u = self.student(x_u)
 
             with torch.no_grad():
-                t_u = self.teacher(x_u)
+                t_u, _ = self.teacher(x_u)
 
-            pseudo = frequency_filter(torch.sigmoid(t_u))
+            pseudo = torch.sigmoid(t_u).float()
+
+            pseudo = frequency_filter(pseudo)
 
             loss_sup = supervised_loss(s_l, y_l)
             loss_unsup = unsupervised_loss(s_u, pseudo)
