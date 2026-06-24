@@ -3,21 +3,19 @@ import torch.nn.functional as F
 
 
 def supervised_loss(logits, target):
-    target = target.float()
+    target = F.interpolate(target.float(), size=logits.shape[2:], mode="trilinear", align_corners=False)
     return F.binary_cross_entropy_with_logits(logits, target)
 
 
 def unsupervised_loss(logits, pseudo):
-    return F.mse_loss(torch.sigmoid(logits), pseudo)
+    pseudo = F.interpolate(pseudo.float(), size=logits.shape[2:], mode="trilinear", align_corners=False)
+    prob = torch.sigmoid(logits)
+    return F.mse_loss(prob, pseudo)
 
 
-def spectral_consistency_loss(s, t):
-
-    # CRITICAL FIX: always FP32
-    s = s.float().detach()
-    t = t.float().detach()
+def spectral_consistency_loss(student, teacher):
 
     def fft(x):
-        return torch.fft.fftn(x, dim=(2,3,4)).abs()
+        return torch.fft.fftn(x.float(), dim=(2,3,4)).abs()
 
-    return F.mse_loss(fft(s), fft(t))
+    return F.mse_loss(fft(student), fft(teacher))

@@ -26,7 +26,7 @@ class MeanTeacherTrainer:
     @torch.no_grad()
     def update_teacher(self):
         for t, s in zip(self.teacher.parameters(), self.student.parameters()):
-            t.data.mul_(self.ema).add_(s.data, alpha=1 - self.ema)
+            t.data.mul_(self.ema).add_(s.data, alpha=1-self.ema)
 
     def train_step(self, batch_l, batch_u):
 
@@ -36,23 +36,22 @@ class MeanTeacherTrainer:
 
         with autocast("cuda"):
 
-            s_l, feat_l = self.student(x_l)
-            s_u, feat_u = self.student(x_u)
+            s_l, f_l = self.student(x_l)
+            s_u, f_u = self.student(x_u)
 
             with torch.no_grad():
                 t_u, _ = self.teacher(x_u)
 
-            pseudo = torch.sigmoid(t_u).float()
+            pseudo = torch.sigmoid(t_u)
 
-            pseudo = frequency_filter(pseudo)
+            pseudo = frequency_filter(pseudo.float())
 
             loss_sup = supervised_loss(s_l, y_l)
             loss_unsup = unsupervised_loss(s_u, pseudo)
-            loss_spec = spectral_consistency_loss(s_u, t_u)
+            loss_spec = spectral_consistency_loss(s_u.float(), t_u.float())
+            loss_proto = prototype_contrast_loss(f_l, y_l, self.memory)
 
-            loss_proto = prototype_contrast_loss(feat_l, y_l, self.memory)
-
-            loss = loss_sup + 0.5 * loss_unsup + 0.1 * loss_spec + 0.1 * loss_proto
+            loss = loss_sup + 0.5*loss_unsup + 0.1*loss_spec + 0.1*loss_proto
 
         self.scaler.scale(loss).backward()
         self.scaler.step(self.opt)
