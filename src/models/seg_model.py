@@ -46,7 +46,11 @@ class HybridUNet(nn.Module):
 
     def _align(self, x, ref):
         if x.shape[2:] != ref.shape[2:]:
-            x = F.interpolate(x, size=ref.shape[2:], mode="trilinear", align_corners=False)
+            x = F.interpolate(
+                x, size=ref.shape[2:],
+                mode="trilinear",
+                align_corners=False
+            )
         return x
 
     def forward(self, x):

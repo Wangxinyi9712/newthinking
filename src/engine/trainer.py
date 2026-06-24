@@ -33,7 +33,6 @@ class MeanTeacherTrainer:
         y_l = batch_l["label"].cuda()
         x_u = batch_u["image"].cuda()
 
-        # ❗ AMP only forward safe
         with autocast("cuda", enabled=True):
 
             s_l, f_l = self.student(x_l)
@@ -44,7 +43,6 @@ class MeanTeacherTrainer:
 
             pseudo = torch.sigmoid(t_u).float()
 
-            # ❗ FFT must be float32 safe
             pseudo = frequency_filter(pseudo.float())
 
             loss_sup = supervised_loss(s_l, y_l)

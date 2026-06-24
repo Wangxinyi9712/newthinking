@@ -12,7 +12,12 @@ def supervised_loss(logits, target):
     logits = _clean(logits)
     target = _clean(target)
 
-    target = F.interpolate(target, size=logits.shape[2:], mode="trilinear", align_corners=False)
+    target = F.interpolate(
+        target,
+        size=logits.shape[2:],
+        mode="trilinear",
+        align_corners=False
+    )
 
     return F.binary_cross_entropy_with_logits(logits, target)
 
@@ -21,17 +26,21 @@ def unsupervised_loss(logits, pseudo):
     logits = _clean(logits)
     pseudo = _clean(pseudo)
 
-    pseudo = F.interpolate(pseudo, size=logits.shape[2:], mode="trilinear", align_corners=False)
+    pseudo = F.interpolate(
+        pseudo,
+        size=logits.shape[2:],
+        mode="trilinear",
+        align_corners=False
+    )
 
-    prob = torch.sigmoid(logits)
-    return F.mse_loss(prob, pseudo)
+    return F.mse_loss(torch.sigmoid(logits), pseudo)
 
 
 def spectral_consistency_loss(s, t):
     s = _clean(s)
     t = _clean(t)
 
-    # ❗ FORCE CPU FFT SAFE MODE (fix fp16/cuFFT crash)
+    # ❗ MUST disable AMP effect
     s = s.float()
     t = t.float()
 
