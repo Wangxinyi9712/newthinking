@@ -2,8 +2,7 @@ import torch
 from torch.optim import Adam
 from torch.amp import autocast, GradScaler
 
-from src.losses.seg_losses import *
-from src.losses.contrastive import prototype_contrast_loss
+from src.losses.seg_losses import supervised_loss, unsupervised_loss
 
 
 class MeanTeacherTrainer:
@@ -12,16 +11,18 @@ class MeanTeacherTrainer:
 
         self.student = model.cuda()
         self.teacher = model.cuda()
+
         self.teacher.load_state_dict(self.student.state_dict())
+        self.teacher.eval()
 
         self.opt = Adam(self.student.parameters(), lr=1e-4)
         self.scaler = GradScaler("cuda")
 
         self.ema = 0.99
-        self.memory = {}
 
     @torch.no_grad()
     def update_teacher(self):
+
         for t, s in zip(self.teacher.parameters(), self.student.parameters()):
             t.data.mul_(self.ema).add_(s.data, alpha=1-self.ema)
 
@@ -31,22 +32,20 @@ class MeanTeacherTrainer:
         y_l = batch_l["label"].cuda().float()
         x_u = batch_u["image"].cuda().float()
 
-        with autocast("cuda", enabled=True):
+        with autocast("cuda"):
 
-            s_l, f_l = self.student(x_l, return_feat=True)
-            s_u, f_u = self.student(x_u, return_feat=True)
+            s_l = self.student(x_l)
+            s_u = self.student(x_u)
 
             with torch.no_grad():
                 t_u = self.teacher(x_u)
 
-            pseudo = torch.sigmoid(t_u).detach()
+            pseudo = torch.sigmoid(t_u)
 
             loss_sup = supervised_loss(s_l, y_l)
             loss_unsup = unsupervised_loss(s_u, pseudo)
 
-            loss_proto = prototype_contrast_loss(f_l, y_l, self.memory)
-
-            loss = loss_sup + 0.3*loss_unsup + 0.1*loss_proto
+            loss = loss_sup + 0.3 * loss_unsup
 
         self.scaler.scale(loss).backward()
         self.scaler.step(self.opt)
