@@ -1,76 +1,145 @@
-from monai.transforms import *
+from __future__ import annotations
 
-# ---------------- 3D ----------------
+from typing import Sequence
 
-def get_train_transforms_3d():
-    return Compose([
-        LoadImaged(keys=["image", "label"]),
-        EnsureChannelFirstd(keys=["image", "label"]),
-        NormalizeIntensityd(keys=["image"]),
-        RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=0),
-        RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=1),
-        RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=2),
-        RandAffined(
-            keys=["image", "label"],
-            prob=0.2,
-            rotate_range=(0.1, 0.1, 0.1),
-            scale_range=(0.1, 0.1, 0.1),
-        ),
-        EnsureTyped(keys=["image", "label"]),
-    ])
-
-
-def get_train_unlabeled_transforms_3d():
-    return Compose([
-        LoadImaged(keys=["image"]),
-        EnsureChannelFirstd(keys=["image"]),
-        NormalizeIntensityd(keys=["image"]),
-        RandFlipd(keys=["image"], prob=0.5, spatial_axis=0),
-        RandFlipd(keys=["image"], prob=0.5, spatial_axis=1),
-        RandFlipd(keys=["image"], prob=0.5, spatial_axis=2),
-        RandScaleIntensityd(keys=["image"], factors=0.1, prob=0.3),
-        RandGaussianNoised(keys=["image"], std=0.01, prob=0.2),
-        EnsureTyped(keys=["image"]),
-    ])
+import torch
+from monai.transforms import (
+    Compose,
+    EnsureChannelFirstd,
+    EnsureTyped,
+    Lambdad,
+    LoadImaged,
+    NormalizeIntensityd,
+    RandAffined,
+    RandFlipd,
+    RandGaussianNoised,
+    RandScaleIntensityd,
+    RandSpatialCropd,
+    ResizeWithPadOrCropd,
+)
 
 
-def get_val_transforms_3d():
-    return Compose([
-        LoadImaged(keys=["image", "label"]),
-        EnsureChannelFirstd(keys=["image", "label"]),
-        NormalizeIntensityd(keys=["image"]),
-        EnsureTyped(keys=["image", "label"]),
-    ])
+def _binarize_label(x):
+    if hasattr(x, "astype"):
+        return (x > 0).astype("float32")
+    if isinstance(x, torch.Tensor):
+        return (x > 0).float()
+    return x
 
 
-# ---------------- 2D (新增) ----------------
+def get_train_transforms_3d(spatial_size: Sequence[int] = (96, 96, 96)):
+    spatial_size = tuple(spatial_size)
 
-def get_train_transforms_2d():
-    return Compose([
-        LoadImaged(keys=["image", "label"]),
-        EnsureChannelFirstd(keys=["image", "label"]),
-        ResizeD(keys=["image", "label"], spatial_size=(256, 256)),
-        NormalizeIntensityd(keys=["image"]),
-        RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=0),
-        EnsureTyped(keys=["image", "label"]),
-    ])
+    return Compose(
+        [
+            LoadImaged(keys=["image", "label"]),
+            EnsureChannelFirstd(keys=["image", "label"]),
+            Lambdad(keys=["label"], func=_binarize_label),
+            NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
+            RandSpatialCropd(
+                keys=["image", "label"],
+                roi_size=spatial_size,
+                random_size=False,
+            ),
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=0),
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=1),
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=2),
+            RandAffined(
+                keys=["image", "label"],
+                prob=0.15,
+                rotate_range=(0.08, 0.08, 0.08),
+                scale_range=(0.08, 0.08, 0.08),
+                mode=("bilinear", "nearest"),
+                padding_mode="border",
+            ),
+            EnsureTyped(keys=["image", "label"], track_meta=False),
+        ]
+    )
 
 
-def get_train_unlabeled_transforms_2d():
-    return Compose([
-        LoadImaged(keys=["image"]),
-        EnsureChannelFirstd(keys=["image"]),
-        ResizeD(keys=["image"], spatial_size=(256, 256)),
-        NormalizeIntensityd(keys=["image"]),
-        EnsureTyped(keys=["image"]),
-    ])
+def get_train_unlabeled_transforms_3d(spatial_size: Sequence[int] = (96, 96, 96)):
+    spatial_size = tuple(spatial_size)
+
+    return Compose(
+        [
+            LoadImaged(keys=["image"]),
+            EnsureChannelFirstd(keys=["image"]),
+            NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
+            RandSpatialCropd(
+                keys=["image"],
+                roi_size=spatial_size,
+                random_size=False,
+            ),
+            RandFlipd(keys=["image"], prob=0.5, spatial_axis=0),
+            RandFlipd(keys=["image"], prob=0.5, spatial_axis=1),
+            RandFlipd(keys=["image"], prob=0.5, spatial_axis=2),
+            RandScaleIntensityd(keys=["image"], factors=0.1, prob=0.4),
+            RandGaussianNoised(keys=["image"], std=0.01, prob=0.25),
+            EnsureTyped(keys=["image"], track_meta=False),
+        ]
+    )
 
 
-def get_val_transforms_2d():
-    return Compose([
-        LoadImaged(keys=["image", "label"]),
-        EnsureChannelFirstd(keys=["image", "label"]),
-        ResizeD(keys=["image", "label"], spatial_size=(256, 256)),
-        NormalizeIntensityd(keys=["image"]),
-        EnsureTyped(keys=["image", "label"]),
-    ])
+def get_val_transforms_3d(spatial_size: Sequence[int] = (96, 96, 96)):
+    spatial_size = tuple(spatial_size)
+
+    return Compose(
+        [
+            LoadImaged(keys=["image", "label"]),
+            EnsureChannelFirstd(keys=["image", "label"]),
+            Lambdad(keys=["label"], func=_binarize_label),
+            NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
+            ResizeWithPadOrCropd(keys=["image", "label"], spatial_size=spatial_size),
+            EnsureTyped(keys=["image", "label"], track_meta=False),
+        ]
+    )
+
+
+def get_train_transforms_2d(spatial_size: Sequence[int] = (256, 256)):
+    spatial_size = tuple(spatial_size)
+
+    return Compose(
+        [
+            LoadImaged(keys=["image", "label"]),
+            EnsureChannelFirstd(keys=["image", "label"]),
+            Lambdad(keys=["label"], func=_binarize_label),
+            NormalizeIntensityd(keys=["image"], nonzero=False, channel_wise=True),
+            ResizeWithPadOrCropd(keys=["image", "label"], spatial_size=spatial_size),
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=0),
+            RandFlipd(keys=["image", "label"], prob=0.5, spatial_axis=1),
+            EnsureTyped(keys=["image", "label"], track_meta=False),
+        ]
+    )
+
+
+def get_train_unlabeled_transforms_2d(spatial_size: Sequence[int] = (256, 256)):
+    spatial_size = tuple(spatial_size)
+
+    return Compose(
+        [
+            LoadImaged(keys=["image"]),
+            EnsureChannelFirstd(keys=["image"]),
+            NormalizeIntensityd(keys=["image"], nonzero=False, channel_wise=True),
+            ResizeWithPadOrCropd(keys=["image"], spatial_size=spatial_size),
+            RandFlipd(keys=["image"], prob=0.5, spatial_axis=0),
+            RandFlipd(keys=["image"], prob=0.5, spatial_axis=1),
+            RandScaleIntensityd(keys=["image"], factors=0.1, prob=0.4),
+            RandGaussianNoised(keys=["image"], std=0.01, prob=0.25),
+            EnsureTyped(keys=["image"], track_meta=False),
+        ]
+    )
+
+
+def get_val_transforms_2d(spatial_size: Sequence[int] = (256, 256)):
+    spatial_size = tuple(spatial_size)
+
+    return Compose(
+        [
+            LoadImaged(keys=["image", "label"]),
+            EnsureChannelFirstd(keys=["image", "label"]),
+            Lambdad(keys=["label"], func=_binarize_label),
+            NormalizeIntensityd(keys=["image"], nonzero=False, channel_wise=True),
+            ResizeWithPadOrCropd(keys=["image", "label"], spatial_size=spatial_size),
+            EnsureTyped(keys=["image", "label"], track_meta=False),
+        ]
+    )
