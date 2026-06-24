@@ -2,49 +2,21 @@ import torch
 import torch.nn.functional as F
 
 
-def _clean(x):
-    if hasattr(x, "detach"):
-        x = x.detach()
-    return x.float()
-
-
 def supervised_loss(logits, target):
-    logits = _clean(logits)
-    target = _clean(target)
-
-    target = F.interpolate(
-        target,
-        size=logits.shape[2:],
-        mode="trilinear",
-        align_corners=False
-    )
-
     return F.binary_cross_entropy_with_logits(logits, target)
 
 
 def unsupervised_loss(logits, pseudo):
-    logits = _clean(logits)
-    pseudo = _clean(pseudo)
-
-    pseudo = F.interpolate(
-        pseudo,
-        size=logits.shape[2:],
-        mode="trilinear",
-        align_corners=False
-    )
-
+    logits = F.interpolate(logits, size=pseudo.shape[2:], mode="trilinear", align_corners=False)
     return F.mse_loss(torch.sigmoid(logits), pseudo)
 
 
-def spectral_consistency_loss(s, t):
-    s = _clean(s)
-    t = _clean(t)
-
-    # ❗ MUST disable AMP effect
-    s = s.float()
-    t = t.float()
+def spectral_consistency_loss(student, teacher):
+    # 🔥 disable AMP FFT crash
+    student = student.float()
+    teacher = teacher.float()
 
     def fft(x):
         return torch.fft.fftn(x, dim=(2,3,4)).abs()
 
-    return F.mse_loss(fft(s), fft(t))
+    return F.mse_loss(fft(student), fft(teacher))
