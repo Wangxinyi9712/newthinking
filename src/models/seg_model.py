@@ -4,15 +4,12 @@ import torch.nn.functional as F
 
 
 class ConvBlock(nn.Module):
-
     def __init__(self, cin, cout):
         super().__init__()
-
         self.block = nn.Sequential(
             nn.Conv3d(cin, cout, 3, padding=1),
             nn.InstanceNorm3d(cout),
             nn.LeakyReLU(inplace=True),
-
             nn.Conv3d(cout, cout, 3, padding=1),
             nn.InstanceNorm3d(cout),
             nn.LeakyReLU(inplace=True),
@@ -24,13 +21,11 @@ class ConvBlock(nn.Module):
 
 class HybridUNet(nn.Module):
 
-    # ✅ IMPORTANT: restore full init signature
     def __init__(
         self,
         in_channels=4,
         out_channels=1,
         channels=(16, 32, 64, 128),
-        use_transformer=False
     ):
         super().__init__()
 
@@ -54,7 +49,9 @@ class HybridUNet(nn.Module):
 
         self.seg_head = nn.Conv3d(c1, out_channels, 1)
 
-    # forward（stable version）
+        # projection head for contrastive learning
+        self.proj = nn.Conv3d(c1, 128, 1)
+
     def forward(self, x, return_features=False):
 
         x1 = self.enc1(x)
@@ -77,7 +74,7 @@ class HybridUNet(nn.Module):
         logits = self.seg_head(d1)
 
         if return_features:
-            feat = F.adaptive_avg_pool3d(d1, 1).flatten(1)
+            feat = self.proj(d1)
             return logits, feat
 
         return logits

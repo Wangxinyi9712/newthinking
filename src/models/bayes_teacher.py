@@ -1,13 +1,13 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import copy
 
 
 class BayesianTeacher(nn.Module):
 
-    def __init__(self, model):
+    def __init__(self, student):
         super().__init__()
-        self.model = model
+        self.model = copy.deepcopy(student)
         self.model.eval()
 
     def forward(self, x, T=5):
@@ -15,14 +15,10 @@ class BayesianTeacher(nn.Module):
         preds = []
 
         for _ in range(T):
-            self.model.train()  # dropout enable
+            self.model.train()
             with torch.no_grad():
-                out = torch.sigmoid(self.model(x))
-                preds.append(out)
+                preds.append(torch.sigmoid(self.model(x)))
 
         preds = torch.stack(preds)
 
-        mean = preds.mean(0)
-        var = preds.var(0)
-
-        return mean, var
+        return preds.mean(0), preds.var(0)
