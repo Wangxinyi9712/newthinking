@@ -4,7 +4,6 @@ from torch.amp import autocast, GradScaler
 
 from src.losses.seg_losses import *
 from src.losses.contrastive import prototype_contrast_loss
-from src.utils.frequency import frequency_filter
 
 
 class MeanTeacherTrainer:
@@ -14,7 +13,6 @@ class MeanTeacherTrainer:
         self.student = model.cuda()
         self.teacher = model.cuda()
         self.teacher.load_state_dict(self.student.state_dict())
-        self.teacher.eval()
 
         self.opt = Adam(self.student.parameters(), lr=1e-4)
         self.scaler = GradScaler("cuda")
@@ -29,39 +27,26 @@ class MeanTeacherTrainer:
 
     def train_step(self, batch_l, batch_u):
 
-        x_l = batch_l["image"].cuda()
-        y_l = batch_l["label"].cuda()
-        x_u = batch_u["image"].cuda()
+        x_l = batch_l["image"].cuda().float()
+        y_l = batch_l["label"].cuda().float()
+        x_u = batch_u["image"].cuda().float()
 
-        with autocast("cuda", enabled=True):
+        with autocast("cuda"):
 
-            s_l, f_l = self.student(x_l)
-            s_u, f_u = self.student(x_u)
+            s_l, f_l = self.student(x_l, return_feat=True)
+            s_u, f_u = self.student(x_u, return_feat=True)
 
             with torch.no_grad():
-                t_u, _ = self.teacher(x_u)
+                t_u = self.teacher(x_u)
 
-            pseudo = torch.sigmoid(t_u).float().detach()
-
-            pseudo = frequency_filter(pseudo)
+            pseudo = torch.sigmoid(t_u).detach().float()
 
             loss_sup = supervised_loss(s_l, y_l)
             loss_unsup = unsupervised_loss(s_u, pseudo)
-            loss_spec = spectral_consistency_loss(s_u, t_u)
 
-            # 🔥 FIX: prototype must use detached feature
-            loss_proto = prototype_contrast_loss(
-                f_l.detach(),
-                y_l.detach(),
-                self.memory
-            )
+            loss_proto = prototype_contrast_loss(f_l, y_l, self.memory)
 
-            loss = (
-                loss_sup +
-                0.5 * loss_unsup +
-                0.1 * loss_spec +
-                0.1 * loss_proto
-            )
+            loss = loss_sup + 0.3 * loss_unsup + 0.1 * loss_proto
 
         self.scaler.scale(loss).backward()
         self.scaler.step(self.opt)

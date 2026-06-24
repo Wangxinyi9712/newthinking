@@ -1,26 +1,19 @@
-data:
-  dataset_name: brats2021
-  dim: 3d
-  split_file: data_splits/brats_split.json
-  spatial_size: [96, 96, 96]
-  crop_size: [ 96, 96, 96 ]
-  batch_size: 1
-  num_workers: 2
-  pin_memory: false
-
 model:
   in_channels: 4
   out_channels: 1
-  channels: [16, 32, 64, 128]
+  channels: [32, 64, 128, 256]
 
 train:
-  lr: 1e-4
-  epochs: 200
-  ema_momentum: 0.99
-  amp: true
+  batch_size: 1
+  lr: 0.0001
+  seed: [0]
 
-loss:
-  lambda_proto: 0.05
-  lambda_spec: 0.1
-  lambda_unsup: 1.0
-  lambda_sup: 1.0
+data:
+  dim: 3d
+  batch_size: 1
+  num_workers: 4
+  pin_memory: true
+
+log:
+  out_dir: runs/brats_group_e
+  ckpt_path: runs/brats_group_e/seed_0/best.pt

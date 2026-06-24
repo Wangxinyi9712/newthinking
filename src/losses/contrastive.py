@@ -4,6 +4,9 @@ import torch.nn.functional as F
 
 def prototype_contrast_loss(feat, mask, memory, num_classes=2):
 
+    feat = feat.detach().float()
+    mask = mask.detach().float()
+
     B,C,D,H,W = feat.shape
 
     feat = feat.permute(0,2,3,4,1).reshape(-1, C)
@@ -14,23 +17,19 @@ def prototype_contrast_loss(feat, mask, memory, num_classes=2):
     for c in range(num_classes):
 
         idx = (mask == c)
-        if idx.sum() == 0:
+        if idx.sum() < 10:
             continue
 
-        pos_feat = feat[idx]
+        pos = feat[idx]
 
-        proto = memory.get(c, pos_feat.mean(0))
+        proto = memory.get(c, pos.mean(0)).to(feat.device)
 
-        proto = proto.to(feat.device)
+        # cosine + L2 hybrid (TMI improvement)
+        cos = F.cosine_similarity(pos, proto.unsqueeze(0), dim=1)
+        l2 = (pos - proto).pow(2).mean(dim=1)
 
-        sim = F.cosine_similarity(
-            pos_feat,
-            proto.unsqueeze(0),
-            dim=1
-        )
+        loss += (1 - cos).mean() + 0.1 * l2.mean()
 
-        loss += (1 - sim).mean()
+        memory[c] = pos.mean(0).detach()
 
-        memory[c] = pos_feat.mean(0).detach()
-
-    return loss / num_classes
+    return loss / max(num_classes, 1)
