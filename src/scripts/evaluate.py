@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import torch
@@ -27,19 +28,34 @@ def resolve_ckpt(cfg, ckpt_arg: str) -> Path:
     return Path(ckpt_arg)
 
 
-def load_model(cfg, ckpt_path: Path, device: torch.device) -> HybridUNet:
+def load_model(
+    cfg,
+    ckpt_path: Path,
+    device: torch.device,
+    allow_partial: bool = False,
+) -> HybridUNet:
     model = build_model(cfg).to(device)
 
     ckpt = torch.load(str(ckpt_path), map_location="cpu")
     state = ckpt.get("teacher", ckpt.get("student", ckpt))
 
-    missing, unexpected = model.load_state_dict(state, strict=False)
+    try:
+        incompatible = model.load_state_dict(state, strict=not allow_partial)
+    except RuntimeError as e:
+        raise RuntimeError(
+            "\n[Checkpoint mismatch]\n"
+            f"Checkpoint cannot be strictly loaded: {ckpt_path}\n"
+            "This usually means the checkpoint was trained with an older model definition.\n"
+            "For valid experiments, retrain after replacing the code.\n"
+            "For debugging only, you may pass --allow-partial.\n"
+        ) from e
 
-    if missing:
-        print(f"[WARN] missing keys: {missing[:10]}{' ...' if len(missing) > 10 else ''}")
-
-    if unexpected:
-        print(f"[WARN] unexpected keys: {unexpected[:10]}{' ...' if len(unexpected) > 10 else ''}")
+    if allow_partial:
+        missing, unexpected = incompatible
+        if missing:
+            print(f"[WARN] missing keys: {missing[:10]}{' ...' if len(missing) > 10 else ''}")
+        if unexpected:
+            print(f"[WARN] unexpected keys: {unexpected[:10]}{' ...' if len(unexpected) > 10 else ''}")
 
     model.eval()
     return model
@@ -50,6 +66,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="src/configs/brats_group_e.yaml")
     parser.add_argument("--ckpt", type=str, default="best")
+    parser.add_argument("--allow-partial", action="store_true")
+    parser.add_argument("--out", type=str, default="")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -59,7 +77,13 @@ def main() -> None:
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
-    model = load_model(cfg, ckpt_path, device)
+    model = load_model(
+        cfg=cfg,
+        ckpt_path=ckpt_path,
+        device=device,
+        allow_partial=bool(args.allow_partial),
+    )
+
     loaders = build_dataloaders(cfg.data)
 
     totals = {
@@ -83,22 +107,33 @@ def main() -> None:
         if isinstance(logits, tuple):
             logits = logits[0]
 
-        m = compute_binary_metrics(logits.float(), y.float(), threshold=threshold)
+        metrics = compute_binary_metrics(logits.float(), y.float(), threshold=threshold)
 
-        totals["dice"] += float(m.dice)
-        totals["iou"] += float(m.iou)
-        totals["precision"] += float(m.precision)
-        totals["recall"] += float(m.recall)
-        totals["f1"] += float(m.f1)
-        totals["minority_f1"] += float(m.minority_f1)
-        totals["hd95"] += float(m.hd95)
+        totals["dice"] += float(metrics.dice)
+        totals["iou"] += float(metrics.iou)
+        totals["precision"] += float(metrics.precision)
+        totals["recall"] += float(metrics.recall)
+        totals["f1"] += float(metrics.f1)
+        totals["minority_f1"] += float(metrics.minority_f1)
+        totals["hd95"] += float(metrics.hd95)
         n += 1
 
     n = max(1, n)
+    results = {k: v / n for k, v in totals.items()}
 
     print("===== Evaluation Results =====")
-    for k, v in totals.items():
-        print(f"{k}: {v / n:.6f}")
+    for k, v in results.items():
+        print(f"{k}: {v:.6f}")
+
+    if args.out:
+        out_path = Path(args.out)
+    else:
+        out_path = ckpt_path.parent / "eval_results.json"
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+
+    print(f"[Saved] {out_path}")
 
 
 if __name__ == "__main__":

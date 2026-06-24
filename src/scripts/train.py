@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from src.data.datasets import build_dataloaders
@@ -19,22 +20,30 @@ def build_model(cfg) -> HybridUNet:
 
 
 def main() -> None:
-    cfg = load_config("src/configs/brats_group_e.yaml")
+    config_path = Path("src/configs/brats_group_e.yaml")
+    cfg = load_config(config_path)
 
     seeds = cfg.train.get("seed", [0])
     if not isinstance(seeds, list):
         seeds = [seeds]
 
-    loaders = build_dataloaders(cfg.data)
-
     for seed in seeds:
         seed = int(seed)
+
+        # 关键：必须先 set_seed，再构建包含随机 crop/augment 的 dataloader
         set_seed(seed)
+
+        run_dir = Path(cfg.log["out_dir"]) / f"seed_{seed}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        # 保存本次实验配置，保证可复现
+        shutil.copy2(config_path, run_dir / "config.yaml")
+
+        loaders = build_dataloaders(cfg.data)
 
         model = build_model(cfg)
         trainer = MeanTeacherTrainer(model, cfg)
 
-        run_dir = Path(cfg.log["out_dir"]) / f"seed_{seed}"
         trainer.fit(loaders, str(run_dir))
 
         print(f"[DONE] seed={seed}, outputs saved to {run_dir}")

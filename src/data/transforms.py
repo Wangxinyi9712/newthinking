@@ -16,19 +16,22 @@ from monai.transforms import (
     RandScaleIntensityd,
     RandSpatialCropd,
     ResizeWithPadOrCropd,
+    SpatialPadd,
 )
 
 
 def _binarize_label(x):
     if hasattr(x, "astype"):
         return (x > 0).astype("float32")
+
     if isinstance(x, torch.Tensor):
         return (x > 0).float()
+
     return x
 
 
 def get_train_transforms_3d(spatial_size: Sequence[int] = (96, 96, 96)):
-    spatial_size = tuple(spatial_size)
+    spatial_size = tuple(int(v) for v in spatial_size)
 
     return Compose(
         [
@@ -36,6 +39,10 @@ def get_train_transforms_3d(spatial_size: Sequence[int] = (96, 96, 96)):
             EnsureChannelFirstd(keys=["image", "label"]),
             Lambdad(keys=["label"], func=_binarize_label),
             NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
+
+            # 保证体数据至少不小于 crop size，避免 MSD/Liver 等数据出现裁剪错误。
+            SpatialPadd(keys=["image", "label"], spatial_size=spatial_size),
+
             RandSpatialCropd(
                 keys=["image", "label"],
                 roi_size=spatial_size,
@@ -58,13 +65,16 @@ def get_train_transforms_3d(spatial_size: Sequence[int] = (96, 96, 96)):
 
 
 def get_train_unlabeled_transforms_3d(spatial_size: Sequence[int] = (96, 96, 96)):
-    spatial_size = tuple(spatial_size)
+    spatial_size = tuple(int(v) for v in spatial_size)
 
     return Compose(
         [
             LoadImaged(keys=["image"]),
             EnsureChannelFirstd(keys=["image"]),
             NormalizeIntensityd(keys=["image"], nonzero=True, channel_wise=True),
+
+            SpatialPadd(keys=["image"], spatial_size=spatial_size),
+
             RandSpatialCropd(
                 keys=["image"],
                 roi_size=spatial_size,
@@ -81,7 +91,7 @@ def get_train_unlabeled_transforms_3d(spatial_size: Sequence[int] = (96, 96, 96)
 
 
 def get_val_transforms_3d(spatial_size: Sequence[int] = (96, 96, 96)):
-    spatial_size = tuple(spatial_size)
+    spatial_size = tuple(int(v) for v in spatial_size)
 
     return Compose(
         [
@@ -96,7 +106,7 @@ def get_val_transforms_3d(spatial_size: Sequence[int] = (96, 96, 96)):
 
 
 def get_train_transforms_2d(spatial_size: Sequence[int] = (256, 256)):
-    spatial_size = tuple(spatial_size)
+    spatial_size = tuple(int(v) for v in spatial_size)
 
     return Compose(
         [
@@ -113,7 +123,7 @@ def get_train_transforms_2d(spatial_size: Sequence[int] = (256, 256)):
 
 
 def get_train_unlabeled_transforms_2d(spatial_size: Sequence[int] = (256, 256)):
-    spatial_size = tuple(spatial_size)
+    spatial_size = tuple(int(v) for v in spatial_size)
 
     return Compose(
         [
@@ -131,7 +141,7 @@ def get_train_unlabeled_transforms_2d(spatial_size: Sequence[int] = (256, 256)):
 
 
 def get_val_transforms_2d(spatial_size: Sequence[int] = (256, 256)):
-    spatial_size = tuple(spatial_size)
+    spatial_size = tuple(int(v) for v in spatial_size)
 
     return Compose(
         [
