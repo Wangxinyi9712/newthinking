@@ -2,9 +2,7 @@ import torch
 from torch.optim import Adam
 from torch.amp import autocast, GradScaler
 
-from src.models.bayes_teacher import BayesianTeacher
 from src.losses.seg_losses import *
-from src.losses.contrastive import prototype_contrast_loss
 from src.utils.frequency import frequency_filter
 
 
@@ -13,18 +11,20 @@ class MeanTeacherTrainer:
     def __init__(self, model, cfg):
 
         self.student = model.cuda()
-        self.teacher = BayesianTeacher(model).cuda()
+        self.teacher = model.cuda()
+
+        self.teacher.load_state_dict(self.student.state_dict())
+        self.teacher.eval()
 
         self.opt = Adam(self.student.parameters(), lr=1e-4)
-
         self.scaler = GradScaler("cuda")
+
         self.ema = 0.99
 
-        self.memory = {}
-
+    @torch.no_grad()
     def update_teacher(self):
 
-        for t, s in zip(self.teacher.model.parameters(), self.student.parameters()):
+        for t, s in zip(self.teacher.parameters(), self.student.parameters()):
             t.data = self.ema * t.data + (1 - self.ema) * s.data
 
     def train_step(self, batch_l, batch_u):
@@ -38,15 +38,15 @@ class MeanTeacherTrainer:
             s_l, feat_l = self.student(x_l, return_features=True)
             s_u, feat_u = self.student(x_u, return_features=True)
 
-            t_mean, t_var = self.teacher(x_u)
+            with torch.no_grad():
+                t_u = self.teacher(x_u)
 
-            pseudo = frequency_filter(t_mean)
+            pseudo = frequency_filter(torch.sigmoid(t_u))
 
             loss = (
                 supervised_loss(s_l, y_l) +
                 0.5 * unsupervised_loss(s_u, pseudo) +
-                0.1 * spectral_consistency_loss(s_u, t_mean) +
-                0.05 * prototype_contrast_loss(feat_l, y_l, self.memory)
+                0.1 * spectral_consistency_loss(s_u, t_u)
             )
 
         self.scaler.scale(loss).backward()
