@@ -2,9 +2,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import torch
+
+
+# ---------------------------------------------------------------------
+# Make this script runnable in both ways:
+#   python src/scripts/evaluate.py
+#   python -m src.scripts.evaluate
+# ---------------------------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 
 from src.data.datasets import build_dataloaders
 from src.models.seg_model import HybridUNet
@@ -52,8 +65,10 @@ def load_model(
 
     if allow_partial:
         missing, unexpected = incompatible
+
         if missing:
             print(f"[WARN] missing keys: {missing[:10]}{' ...' if len(missing) > 10 else ''}")
+
         if unexpected:
             print(f"[WARN] unexpected keys: {unexpected[:10]}{' ...' if len(unexpected) > 10 else ''}")
 
@@ -64,7 +79,7 @@ def load_model(
 @torch.no_grad()
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="src/configs/brats_group_e.yaml")
+    parser.add_argument("--config", type=str, default=str(PROJECT_ROOT / "src" / "configs" / "brats_group_e.yaml"))
     parser.add_argument("--ckpt", type=str, default="best")
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--out", type=str, default="")
@@ -74,6 +89,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     ckpt_path = resolve_ckpt(cfg, args.ckpt)
+
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
@@ -116,6 +132,7 @@ def main() -> None:
         totals["f1"] += float(metrics.f1)
         totals["minority_f1"] += float(metrics.minority_f1)
         totals["hd95"] += float(metrics.hd95)
+
         n += 1
 
     n = max(1, n)

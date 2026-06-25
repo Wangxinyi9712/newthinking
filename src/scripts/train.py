@@ -1,7 +1,20 @@
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
+
+
+# ---------------------------------------------------------------------
+# Make this script runnable in both ways:
+#   python src/scripts/train.py
+#   python -m src.scripts.train
+# ---------------------------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 
 from src.data.datasets import build_dataloaders
 from src.engine.trainer import MeanTeacherTrainer
@@ -20,7 +33,7 @@ def build_model(cfg) -> HybridUNet:
 
 
 def main() -> None:
-    config_path = Path("src/configs/brats_group_e.yaml")
+    config_path = PROJECT_ROOT / "src" / "configs" / "brats_group_e.yaml"
     cfg = load_config(config_path)
 
     seeds = cfg.train.get("seed", [0])
@@ -29,14 +42,11 @@ def main() -> None:
 
     for seed in seeds:
         seed = int(seed)
-
-        # 关键：必须先 set_seed，再构建包含随机 crop/augment 的 dataloader
         set_seed(seed)
 
         run_dir = Path(cfg.log["out_dir"]) / f"seed_{seed}"
         run_dir.mkdir(parents=True, exist_ok=True)
 
-        # 保存本次实验配置，保证可复现
         shutil.copy2(config_path, run_dir / "config.yaml")
 
         loaders = build_dataloaders(cfg.data)
