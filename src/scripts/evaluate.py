@@ -8,13 +8,7 @@ from pathlib import Path
 import torch
 
 
-# ---------------------------------------------------------------------
-# Make this script runnable in both ways:
-#   python src/scripts/evaluate.py
-#   python -m src.scripts.evaluate
-# ---------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -23,6 +17,19 @@ from src.data.datasets import build_dataloaders
 from src.models.seg_model import HybridUNet
 from src.utils.config import load_config
 from src.utils.metrics import compute_binary_metrics
+
+
+def normalize_config_paths(cfg) -> None:
+    split_file = cfg.data.get("split_file", cfg.data.get("split_json"))
+    if split_file is not None:
+        p = Path(split_file)
+        if not p.is_absolute():
+            cfg.data["split_file"] = str(PROJECT_ROOT / p)
+
+    out_dir = cfg.log.get("out_dir", "runs/default")
+    p = Path(out_dir)
+    if not p.is_absolute():
+        cfg.log["out_dir"] = str(PROJECT_ROOT / p)
 
 
 def build_model(cfg) -> HybridUNet:
@@ -34,11 +41,15 @@ def build_model(cfg) -> HybridUNet:
     )
 
 
-def resolve_ckpt(cfg, ckpt_arg: str) -> Path:
+def resolve_ckpt(cfg, ckpt_arg: str, seed: int) -> Path:
     if ckpt_arg in {"best", "last"}:
-        return Path(cfg.log["out_dir"]) / "seed_0" / f"{ckpt_arg}.pt"
+        return Path(cfg.log["out_dir"]) / f"seed_{seed}" / f"{ckpt_arg}.pt"
 
-    return Path(ckpt_arg)
+    p = Path(ckpt_arg)
+    if not p.is_absolute():
+        p = PROJECT_ROOT / p
+
+    return p
 
 
 def load_model(
@@ -46,11 +57,18 @@ def load_model(
     ckpt_path: Path,
     device: torch.device,
     allow_partial: bool = False,
+    source: str = "teacher",
 ) -> HybridUNet:
     model = build_model(cfg).to(device)
 
     ckpt = torch.load(str(ckpt_path), map_location="cpu")
-    state = ckpt.get("teacher", ckpt.get("student", ckpt))
+
+    if source == "teacher":
+        state = ckpt.get("teacher", ckpt.get("student", ckpt))
+    elif source == "student":
+        state = ckpt.get("student", ckpt.get("teacher", ckpt))
+    else:
+        raise ValueError(f"Unsupported source: {source}. Use teacher or student.")
 
     try:
         incompatible = model.load_state_dict(state, strict=not allow_partial)
@@ -60,7 +78,7 @@ def load_model(
             f"Checkpoint cannot be strictly loaded: {ckpt_path}\n"
             "This usually means the checkpoint was trained with an older model definition.\n"
             "For valid experiments, retrain after replacing the code.\n"
-            "For debugging only, you may pass --allow-partial.\n"
+            "For debugging only, pass --allow-partial.\n"
         ) from e
 
     if allow_partial:
@@ -76,20 +94,35 @@ def load_model(
     return model
 
 
-@torch.no_grad()
-def main() -> None:
+def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=str(PROJECT_ROOT / "src" / "configs" / "brats_group_e.yaml"))
     parser.add_argument("--ckpt", type=str, default="best")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--source", type=str, default="teacher", choices=["teacher", "student"])
     parser.add_argument("--allow-partial", action="store_true")
     parser.add_argument("--out", type=str, default="")
-    args = parser.parse_args()
+    parser.add_argument("--max-val-batches", type=int, default=0)
+    return parser.parse_args()
 
-    cfg = load_config(args.config)
+
+@torch.no_grad()
+def main() -> None:
+    args = parse_args()
+
+    config_path = Path(args.config)
+    if not config_path.is_absolute():
+        config_path = PROJECT_ROOT / config_path
+
+    cfg = load_config(config_path)
+    normalize_config_paths(cfg)
+
+    if args.max_val_batches > 0:
+        cfg.train["max_val_batches"] = int(args.max_val_batches)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    ckpt_path = resolve_ckpt(cfg, args.ckpt)
-
+    ckpt_path = resolve_ckpt(cfg, args.ckpt, seed=int(args.seed))
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
@@ -98,6 +131,7 @@ def main() -> None:
         ckpt_path=ckpt_path,
         device=device,
         allow_partial=bool(args.allow_partial),
+        source=args.source,
     )
 
     loaders = build_dataloaders(cfg.data)
@@ -114,6 +148,7 @@ def main() -> None:
 
     n = 0
     threshold = float(cfg.inference.get("threshold", 0.5))
+    max_val_batches = int(cfg.train.get("max_val_batches", 0) or 0)
 
     for batch in loaders["val"]:
         x = batch["image"].to(device).float()
@@ -135,17 +170,30 @@ def main() -> None:
 
         n += 1
 
+        if max_val_batches > 0 and n >= max_val_batches:
+            break
+
     n = max(1, n)
     results = {k: v / n for k, v in totals.items()}
 
+    results["config"] = str(config_path)
+    results["ckpt"] = str(ckpt_path)
+    results["seed"] = int(args.seed)
+    results["source"] = args.source
+
     print("===== Evaluation Results =====")
     for k, v in results.items():
-        print(f"{k}: {v:.6f}")
+        if isinstance(v, float):
+            print(f"{k}: {v:.6f}")
+        else:
+            print(f"{k}: {v}")
 
     if args.out:
         out_path = Path(args.out)
+        if not out_path.is_absolute():
+            out_path = PROJECT_ROOT / out_path
     else:
-        out_path = ckpt_path.parent / "eval_results.json"
+        out_path = ckpt_path.parent / f"eval_results_{args.source}.json"
 
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)

@@ -24,7 +24,7 @@ train:
   lr: 0.0001
   min_lr: 0.000001
   epochs: 200
-  seed: [0]
+  seed: [0, 1, 2]
 
   use_amp: true
   grad_clip: 1.0
@@ -35,18 +35,18 @@ train:
   log_every: 10
 
 loss:
-  group_name: E_full_default
+  group_name: C_frequency
   use_unlabeled: true
   use_frequency_filter: true
 
   lambda_unsup: 0.3
   lambda_spec: 0.05
-  lambda_proto: 0.05
+  lambda_proto: 0.0
 
 inference:
   threshold: 0.5
   use_teacher_ema: true
 
 log:
-  out_dir: runs/brats_group_e
-  ckpt_path: runs/brats_group_e/seed_0/best.pt
+  out_dir: runs/experiments/brats_group_c_frequency
+  ckpt_path: runs/experiments/brats_group_c_frequency/seed_0/best.pt
