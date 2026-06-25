@@ -1,9 +1,9 @@
 #!/bin/bash
-#SBATCH -o slurm_out_new.log
-#SBATCH -e slurm_err_new.log
-#SBATCH --partition=gpu-l20
+#SBATCH -o slurm_out_%j.log
+#SBATCH -e slurm_err_%j.log
+#SBATCH --partition=gpu-a10
 #SBATCH --qos=normal
-#SBATCH -J newthinking
+#SBATCH -J newthinking_smoke
 #SBATCH --nodes=1
 #SBATCH -c 16
 #SBATCH --ntasks-per-node=1
@@ -28,7 +28,6 @@ BRATS_ROOT="data/BraTS2023"
 SPLIT_FILE="data_splits/brats_split.json"
 CONFIG_FILE="src/configs/experiments/brats_group_e_full.yaml"
 
-mkdir -p logs
 
 echo "[1/8] GPU info"
 nvidia-smi || true
