@@ -40,7 +40,7 @@ loss:
   use_frequency_filter: true
 
   lambda_unsup: 0.3
-  lambda_spec: 0.05
+  lambda_spec: 0.01
   lambda_proto: 0.05
 
 inference:
