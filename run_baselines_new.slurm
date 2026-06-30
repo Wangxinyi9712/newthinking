@@ -1,9 +1,9 @@
 #!/bin/bash
-#SBATCH -o slurm_ablation.log
-#SBATCH -e slurm_ablation.log
+#SBATCH -o slurm_out_baselines.log
+#SBATCH -e slurm_err_baselines.log
 #SBATCH --partition=gpu-a10
 #SBATCH --qos=normal
-#SBATCH -J newthinking_ablation
+#SBATCH -J newthinking_baselines
 #SBATCH --nodes=1
 #SBATCH -c 16
 #SBATCH --ntasks-per-node=1
@@ -12,7 +12,7 @@
 set -euo pipefail
 
 echo "=============================="
-echo " NewThinking Ablation Training Job"
+echo " NewThinking Baseline Training Job"
 echo " Job ID: ${SLURM_JOB_ID:-none}"
 echo " Host: $(hostname)"
 echo " Start time: $(date)"
@@ -70,19 +70,17 @@ python src/scripts/build_splits.py \
   --labeled-ratio 0.10 \
   --seed 3407
 
-echo "[6/9] Define experiment groups"
+echo "[6/9] Start baseline experiments"
 
 CONFIGS=(
-  "src/configs/experiments/brats_group_a_supervised.yaml"
-  "src/configs/experiments/brats_group_b_mean_teacher.yaml"
-  "src/configs/experiments/brats_group_c_frequency.yaml"
-  "src/configs/experiments/brats_group_d_prototype.yaml"
-  "src/configs/experiments/brats_group_e_full.yaml"
+  "src/configs/baselines/brats_baseline_f_nnunet.yaml"
+  "src/configs/baselines/brats_baseline_g_bcp.yaml"
+  "src/configs/baselines/brats_baseline_h_unimatch.yaml"
+  "src/configs/baselines/brats_baseline_i_corrmatch.yaml"
+  "src/configs/baselines/brats_baseline_j_wtbcp.yaml"
 )
 
 SEEDS=(0 1 2)
-
-echo "[7/9] Start A-E ablation experiments"
 
 for CFG in "${CONFIGS[@]}"; do
   if [ ! -f "${CFG}" ]; then
@@ -115,20 +113,21 @@ for CFG in "${CONFIGS[@]}"; do
   done
 done
 
-echo "[8/9] Summarize results"
+echo "[7/9] Summarize baseline results"
 
 if [ -f "src/scripts/summarize_results.py" ]; then
   python src/scripts/summarize_results.py \
-    --root runs/experiments \
-    --out runs/experiments_summary.csv
+    --root runs/baselines \
+    --out runs/baselines_summary.csv
 else
   echo "[WARN] src/scripts/summarize_results.py not found. Skip summary."
 fi
 
-echo "[9/9] Finished"
+echo "[8/9] Finished"
+
 echo "=============================="
 echo " Job finished at $(date)"
 echo " Outputs:"
-echo "   runs/experiments/"
-echo "   runs/experiments_summary.csv"
+echo "   runs/baselines/"
+echo "   runs/baselines_summary.csv"
 echo "=============================="

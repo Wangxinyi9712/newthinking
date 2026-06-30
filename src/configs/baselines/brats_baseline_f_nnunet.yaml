@@ -1,0 +1,57 @@
+data:
+  dataset_name: brats2023
+  dim: 3d
+  split_file: data_splits/brats_split.json
+
+  spatial_size: [96, 96, 96]
+  crop_size: [96, 96, 96]
+
+  batch_size: 1
+  num_workers: 0
+  pin_memory: false
+
+  minority_oversample: false
+  minority_oversample_power: 1.5
+
+model:
+  name: HybridUNet
+  in_channels: 4
+  out_channels: 1
+
+  # nnU-Net-style stronger supervised baseline.
+  # 如果 A10 显存不足，可改回 [16, 32, 64, 128],如果充足，可设置为 [24,48,96,192]
+  channels: [16, 32, 64, 128]
+  use_transformer: false
+
+train:
+  lr: 0.0001
+  min_lr: 0.000001
+  epochs: 200
+  seed: [0, 1, 2]
+
+  use_amp: true
+  grad_clip: 1.0
+  ema_momentum: 0.99
+
+  max_train_steps: 0
+  max_val_batches: 0
+  log_every: 10
+
+loss:
+  group_name: F_nnunet_style
+  baseline_method: nnunet
+
+  use_unlabeled: false
+  use_frequency_filter: false
+
+  lambda_unsup: 0.0
+  lambda_spec: 0.0
+  lambda_proto: 0.0
+
+inference:
+  threshold: 0.5
+  use_teacher_ema: true
+
+log:
+  out_dir: runs/baselines/brats_baseline_f_nnunet
+  ckpt_path: runs/baselines/brats_baseline_f_nnunet/seed_0/best.pt
