@@ -9,6 +9,7 @@ import torch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -21,6 +22,7 @@ from src.utils.metrics import compute_binary_metrics
 
 def normalize_config_paths(cfg) -> None:
     split_file = cfg.data.get("split_file", cfg.data.get("split_json"))
+
     if split_file is not None:
         p = Path(split_file)
         if not p.is_absolute():
@@ -28,6 +30,7 @@ def normalize_config_paths(cfg) -> None:
 
     out_dir = cfg.log.get("out_dir", "runs/default")
     p = Path(out_dir)
+
     if not p.is_absolute():
         cfg.log["out_dir"] = str(PROJECT_ROOT / p)
 
@@ -46,6 +49,7 @@ def resolve_ckpt(cfg, ckpt_arg: str, seed: int) -> Path:
         return Path(cfg.log["out_dir"]) / f"seed_{seed}" / f"{ckpt_arg}.pt"
 
     p = Path(ckpt_arg)
+
     if not p.is_absolute():
         p = PROJECT_ROOT / p
 
@@ -96,7 +100,11 @@ def load_model(
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default=str(PROJECT_ROOT / "src" / "configs" / "brats_group_e.yaml"))
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=str(PROJECT_ROOT / "src" / "configs" / "brats_group_e.yaml"),
+    )
     parser.add_argument("--ckpt", type=str, default="best")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--source", type=str, default="teacher", choices=["teacher", "student"])
@@ -111,6 +119,7 @@ def main() -> None:
     args = parse_args()
 
     config_path = Path(args.config)
+
     if not config_path.is_absolute():
         config_path = PROJECT_ROOT / config_path
 
@@ -123,6 +132,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     ckpt_path = resolve_ckpt(cfg, args.ckpt, seed=int(args.seed))
+
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
@@ -144,6 +154,9 @@ def main() -> None:
         "f1": 0.0,
         "minority_f1": 0.0,
         "hd95": 0.0,
+        "boundary_dice": 0.0,
+        "assd": 0.0,
+        "volume_error": 0.0,
     }
 
     n = 0
@@ -160,13 +173,8 @@ def main() -> None:
 
         metrics = compute_binary_metrics(logits.float(), y.float(), threshold=threshold)
 
-        totals["dice"] += float(metrics.dice)
-        totals["iou"] += float(metrics.iou)
-        totals["precision"] += float(metrics.precision)
-        totals["recall"] += float(metrics.recall)
-        totals["f1"] += float(metrics.f1)
-        totals["minority_f1"] += float(metrics.minority_f1)
-        totals["hd95"] += float(metrics.hd95)
+        for k in totals:
+            totals[k] += float(getattr(metrics, k))
 
         n += 1
 
@@ -182,6 +190,7 @@ def main() -> None:
     results["source"] = args.source
 
     print("===== Evaluation Results =====")
+
     for k, v in results.items():
         if isinstance(v, float):
             print(f"{k}: {v:.6f}")
