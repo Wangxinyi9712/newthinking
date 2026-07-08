@@ -23,7 +23,6 @@ CONDA_ENV="newthinking"
 BRATS_ROOT="data/BraTS2023"
 SPLIT_FILE="data_splits/brats_split.json"
 
-mkdir -p logs
 
 echo "[1/9] GPU info"
 nvidia-smi || true
