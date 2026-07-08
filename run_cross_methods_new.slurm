@@ -67,18 +67,38 @@ CONFIGS=(
   "src/configs/experiments/brats_group_o_pde_sdf_ot_proto_uniteacher.yaml"
 )
 
-python src/scripts/train.py --config ./src/configs/experiments/brats_group_k_unimatch_sdf.yaml --seed 0 --smoke
-python src/scripts/train.py --config ./src/configs/experiments/brats_group_k_unimatch_sdf.yaml --seed 0 1 2
-python src/scripts/train.py --config ./src/configs/experiments/brats_group_l_unimatch_pde.yaml --seed 0 1 2
-python src/scripts/train.py --config ./src/configs/experiments/brats_group_m_unimatch_ot.yaml --seed 0 1 2
-python src/scripts/train.py --config ./src/configs/experiments/brats_group_n_pde_sdf_ot_uniteacher.yaml --seed 0 1 2
-python src/scripts/train.py --config ./src/configs/experiments/brats_group_o_pde_sdf_ot_proto_uniteacher.yaml --seed 0 1 2
+#python src/scripts/train.py --config ./src/configs/experiments/brats_group_k_unimatch_sdf.yaml --seed 0 --smoke
+#python src/scripts/train.py --config ./src/configs/experiments/brats_group_k_unimatch_sdf.yaml --seed 0
+python src/scripts/train.py --config ./src/configs/experiments/brats_group_k_unimatch_sdf.yaml --seed 1
+python src/scripts/train.py --config ./src/configs/experiments/brats_group_k_unimatch_sdf.yaml --seed 2
+python src/scripts/train.py --config ./src/configs/experiments/brats_group_l_unimatch_pde.yaml --seed 0
+python src/scripts/train.py --config ./src/configs/experiments/brats_group_l_unimatch_pde.yaml --seed 1
+python src/scripts/train.py --config ./src/configs/experiments/brats_group_l_unimatch_pde.yaml --seed 2
+#python src/scripts/train.py --config ./src/configs/experiments/brats_group_m_unimatch_ot.yaml --seed 0
+#python src/scripts/train.py --config ./src/configs/experiments/brats_group_m_unimatch_ot.yaml --seed 1
+#python src/scripts/train.py --config ./src/configs/experiments/brats_group_m_unimatch_ot.yaml --seed 2
+#python src/scripts/train.py --config ./src/configs/experiments/brats_group_n_pde_sdf_ot_uniteacher.yaml --seed 0
+#python src/scripts/train.py --config ./src/configs/experiments/brats_group_n_pde_sdf_ot_uniteacher.yaml --seed 1
+#python src/scripts/train.py --config ./src/configs/experiments/brats_group_n_pde_sdf_ot_uniteacher.yaml --seed 2
+#python src/scripts/train.py --config ./src/configs/experiments/brats_group_o_pde_sdf_ot_proto_uniteacher.yaml --seed 0
+#python src/scripts/train.py --config ./src/configs/experiments/brats_group_o_pde_sdf_ot_proto_uniteacher.yaml --seed 1
+#python src/scripts/train.py --config ./src/configs/experiments/brats_group_o_pde_sdf_ot_proto_uniteacher.yaml --seed 2
 
 
 
-python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_k_unimatch_sdf.yaml --ckpt best --seed 0 --max-val-batches 5
-python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_k_unimatch_sdf.yaml --ckpt best --seed 0 1 2 --source teacher
-python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_l_unimatch_pde.yaml --ckpt best --seed 0 1 2 --source teacher
-python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_m_unimatch_ot.yaml --ckpt best --seed 0 1 2 --source teacher
-python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_n_pde_sdf_ot_uniteacher.yaml --ckpt best --seed 0 1 2 --source teacher
-python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_o_pde_sdf_ot_proto_uniteacher.yaml --ckpt best --seed 0 1 2 --source teacher
+#python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_k_unimatch_sdf.yaml --ckpt best --seed 0 --max-val-batches 5
+#python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_k_unimatch_sdf.yaml --ckpt best --seed 0 --source teacher
+python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_k_unimatch_sdf.yaml --ckpt best --seed 1 --source teacher
+python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_k_unimatch_sdf.yaml --ckpt best --seed 2 --source teacher
+python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_l_unimatch_pde.yaml --ckpt best --seed 0 --source teacher
+python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_l_unimatch_pde.yaml --ckpt best --seed 1 --source teacher
+python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_l_unimatch_pde.yaml --ckpt best --seed 2 --source teacher
+#python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_m_unimatch_ot.yaml --ckpt best --seed 0 --source teacher
+#python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_m_unimatch_ot.yaml --ckpt best --seed 1 --source teacher
+#python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_m_unimatch_ot.yaml --ckpt best --seed 2 --source teacher
+#python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_n_pde_sdf_ot_uniteacher.yaml --ckpt best --seed 0 --source teacher
+#python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_n_pde_sdf_ot_uniteacher.yaml --ckpt best --seed 1 --source teacher
+#python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_n_pde_sdf_ot_uniteacher.yaml --ckpt best --seed 2 --source teacher
+#python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_o_pde_sdf_ot_proto_uniteacher.yaml --ckpt best --seed 0 --source teacher
+#python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_o_pde_sdf_ot_proto_uniteacher.yaml --ckpt best --seed 1 --source teacher
+#python src/scripts/evaluate.py --config ./src/configs/experiments/brats_group_o_pde_sdf_ot_proto_uniteacher.yaml --ckpt best --seed 2 --source teacher
