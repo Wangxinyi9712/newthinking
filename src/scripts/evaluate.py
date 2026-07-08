@@ -20,6 +20,9 @@ from src.utils.config import load_config
 from src.utils.metrics import compute_binary_metrics
 
 
+DEFAULT_CONFIG = PROJECT_ROOT / "src" / "configs" / "ours.yaml"
+
+
 def normalize_config_paths(cfg) -> None:
     split_file = cfg.data.get("split_file", cfg.data.get("split_json"))
 
@@ -28,7 +31,7 @@ def normalize_config_paths(cfg) -> None:
         if not p.is_absolute():
             cfg.data["split_file"] = str(PROJECT_ROOT / p)
 
-    out_dir = cfg.log.get("out_dir", "runs/default")
+    out_dir = cfg.log.get("out_dir", "runs/ours")
     p = Path(out_dir)
 
     if not p.is_absolute():
@@ -42,6 +45,13 @@ def build_model(cfg) -> HybridUNet:
         channels=tuple(cfg.model.get("channels", [16, 32, 64, 128])),
         use_transformer=bool(cfg.model.get("use_transformer", False)),
     )
+
+
+def safe_torch_load(path: Path, map_location="cpu"):
+    try:
+        return torch.load(str(path), map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(str(path), map_location=map_location)
 
 
 def resolve_ckpt(cfg, ckpt_arg: str, seed: int) -> Path:
@@ -65,7 +75,7 @@ def load_model(
 ) -> HybridUNet:
     model = build_model(cfg).to(device)
 
-    ckpt = torch.load(str(ckpt_path), map_location="cpu")
+    ckpt = safe_torch_load(ckpt_path, map_location="cpu")
 
     if source == "teacher":
         state = ckpt.get("teacher", ckpt.get("student", ckpt))
@@ -103,7 +113,8 @@ def parse_args():
     parser.add_argument(
         "--config",
         type=str,
-        default=str(PROJECT_ROOT / "src" / "configs" / "brats_group_e.yaml"),
+        default=str(DEFAULT_CONFIG),
+        help="Path to YAML config file. Default is the revised Our Method config.",
     )
     parser.add_argument("--ckpt", type=str, default="best")
     parser.add_argument("--seed", type=int, default=0)
@@ -122,6 +133,9 @@ def main() -> None:
 
     if not config_path.is_absolute():
         config_path = PROJECT_ROOT / config_path
+
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config not found: {config_path}")
 
     cfg = load_config(config_path)
     normalize_config_paths(cfg)

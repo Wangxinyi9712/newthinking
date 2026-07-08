@@ -19,6 +19,9 @@ from src.utils.config import load_config
 from src.utils.seed import set_seed
 
 
+DEFAULT_CONFIG = PROJECT_ROOT / "src" / "configs" / "ours.yaml"
+
+
 def normalize_config_paths(cfg) -> None:
     split_file = cfg.data.get("split_file", cfg.data.get("split_json"))
 
@@ -27,7 +30,7 @@ def normalize_config_paths(cfg) -> None:
         if not p.is_absolute():
             cfg.data["split_file"] = str(PROJECT_ROOT / p)
 
-    out_dir = cfg.log.get("out_dir", "runs/default")
+    out_dir = cfg.log.get("out_dir", "runs/ours")
     p = Path(out_dir)
 
     if not p.is_absolute():
@@ -45,15 +48,79 @@ def build_model(cfg) -> HybridUNet:
 
 def parse_args():
     parser = argparse.ArgumentParser()
+
     parser.add_argument(
         "--config",
         type=str,
-        default=str(PROJECT_ROOT / "src" / "configs" / "brats_group_e.yaml"),
+        default=str(DEFAULT_CONFIG),
+        help="Path to YAML config file. Default is the revised Our Method config.",
     )
-    parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--epochs", type=int, default=None)
-    parser.add_argument("--smoke", action="store_true")
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Run one specific seed, e.g. --seed 0.",
+    )
+
+    parser.add_argument(
+        "--seeds",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Run multiple seeds, e.g. --seeds 0 1 2.",
+    )
+
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Override training epochs.",
+    )
+
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="Run a short smoke test.",
+    )
+
     return parser.parse_args()
+
+
+def resolve_seeds(cfg, args) -> list[int]:
+    """
+    Priority:
+      1. --seeds 0 1 2
+      2. --seed 0
+      3. cfg.train.seed
+    """
+    if args.seeds is not None:
+        return [int(s) for s in args.seeds]
+
+    if args.seed is not None:
+        return [int(args.seed)]
+
+    seeds = cfg.train.get("seed", [0])
+
+    if not isinstance(seeds, list):
+        seeds = [seeds]
+
+    return [int(s) for s in seeds]
+
+
+def apply_smoke_overrides(cfg) -> None:
+    cfg.train["epochs"] = min(int(cfg.train.get("epochs", 2)), 2)
+    cfg.train["max_train_steps"] = int(cfg.train.get("max_train_steps", 5) or 5)
+    cfg.train["max_val_batches"] = int(cfg.train.get("max_val_batches", 5) or 5)
+    cfg.train["log_every"] = 1
+
+    cfg.loss["lambda_spec"] = 0.0
+
+    if "lambda_sdf" in cfg.loss:
+        cfg.loss["lambda_sdf"] = min(float(cfg.loss.get("lambda_sdf", 0.0)), 0.01)
+
+    if "lambda_phase" in cfg.loss:
+        cfg.loss["lambda_phase"] = min(float(cfg.loss.get("lambda_phase", 0.0)), 0.001)
 
 
 def main() -> None:
@@ -64,6 +131,9 @@ def main() -> None:
     if not config_path.is_absolute():
         config_path = PROJECT_ROOT / config_path
 
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config not found: {config_path}")
+
     cfg = load_config(config_path)
     normalize_config_paths(cfg)
 
@@ -71,26 +141,15 @@ def main() -> None:
         cfg.train["epochs"] = int(args.epochs)
 
     if args.smoke:
-        cfg.train["epochs"] = min(int(cfg.train.get("epochs", 2)), 2)
-        cfg.train["max_train_steps"] = int(cfg.train.get("max_train_steps", 5) or 5)
-        cfg.train["max_val_batches"] = int(cfg.train.get("max_val_batches", 5) or 5)
-        cfg.train["log_every"] = 1
+        apply_smoke_overrides(cfg)
 
-        # Keep smoke test light and fast.
-        cfg.loss["lambda_spec"] = 0.0
-        cfg.loss["lambda_sdf"] = min(float(cfg.loss.get("lambda_sdf", 0.0)), 0.01)
-        cfg.loss["lambda_phase"] = min(float(cfg.loss.get("lambda_phase", 0.0)), 0.001)
+    seeds = resolve_seeds(cfg, args)
 
-    seeds = cfg.train.get("seed", [0])
-
-    if args.seed is not None:
-        seeds = [args.seed]
-
-    if not isinstance(seeds, list):
-        seeds = [seeds]
+    print(f"[Train] config={config_path}")
+    print(f"[Train] method={cfg.loss.get('group_name', 'unknown')}")
+    print(f"[Train] seeds={seeds}")
 
     for seed in seeds:
-        seed = int(seed)
         set_seed(seed)
 
         run_dir = Path(cfg.log["out_dir"]) / f"seed_{seed}"

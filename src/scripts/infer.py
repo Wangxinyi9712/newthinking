@@ -1,252 +1,191 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import torch
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
 
-from data.datasets import build_dataloaders
-from engine.trainer import MeanTeacherTrainer
-from models.seg_model import HybridUNet
-from utils.config import load_config
-from utils.seed import set_seed
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 
-def _resolve_ckpt(
-    ckpt_arg: str,
-    config_path: str,
-    split: str = "seed_0",
-):
+from src.data.datasets import build_dataloaders
+from src.models.seg_model import HybridUNet
+from src.utils.config import load_config
+from src.utils.seed import set_seed
+
+
+DEFAULT_CONFIG = PROJECT_ROOT / "src" / "configs" / "ours.yaml"
+
+
+def normalize_config_paths(cfg) -> None:
+    split_file = cfg.data.get("split_file", cfg.data.get("split_json"))
+
+    if split_file is not None:
+        p = Path(split_file)
+        if not p.is_absolute():
+            cfg.data["split_file"] = str(PROJECT_ROOT / p)
+
+    out_dir = cfg.log.get("out_dir", "runs/ours")
+    p = Path(out_dir)
+
+    if not p.is_absolute():
+        cfg.log["out_dir"] = str(PROJECT_ROOT / p)
+
+
+def build_model(cfg) -> HybridUNet:
+    return HybridUNet(
+        in_channels=int(cfg.model.get("in_channels", 4)),
+        out_channels=int(cfg.model.get("out_channels", 1)),
+        channels=tuple(cfg.model.get("channels", [16, 32, 64, 128])),
+        use_transformer=bool(cfg.model.get("use_transformer", False)),
+    )
+
+
+def safe_torch_load(path: Path, map_location="cpu"):
+    try:
+        return torch.load(str(path), map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(str(path), map_location=map_location)
+
+
+def resolve_ckpt(cfg, ckpt_arg: str, seed: int) -> Path:
+    if ckpt_arg in {"best", "last"}:
+        return Path(cfg.log["out_dir"]) / f"seed_{seed}" / f"{ckpt_arg}.pt"
+
     p = Path(ckpt_arg)
 
-    if p.suffix == ".pt":
-        return p
+    if not p.is_absolute():
+        p = PROJECT_ROOT / p
 
-    alias = ckpt_arg.lower()
-
-    if alias not in {"best", "last"}:
-        raise ValueError(
-            "ckpt must be path or best/last"
-        )
-
-    cfg = load_config(config_path)
-
-    return (
-        Path(cfg.log["out_dir"])
-        / split
-        / f"{alias}.pt"
-    )
+    return p
 
 
-def _build_model(cfg):
-    dim = 3 if cfg.data.get("dim", "3d") == "3d" else 2
+def load_state_into_model(
+    cfg,
+    ckpt_path: Path,
+    device: torch.device,
+    source: str,
+) -> HybridUNet:
+    model = build_model(cfg).to(device)
+    ckpt = safe_torch_load(ckpt_path, map_location="cpu")
 
-    return HybridUNet(
-        in_channels=int(cfg.model["in_channels"]),
-        out_channels=int(cfg.model["out_channels"]),
-        channels=tuple(cfg.model["channels"]),
-        dim=dim,
-        use_transformer=bool(
-            cfg.model.get("use_transformer", True)
-        ),
-    )
+    if source == "teacher":
+        state = ckpt.get("teacher", ckpt.get("student", ckpt))
+    elif source == "student":
+        state = ckpt.get("student", ckpt.get("teacher", ckpt))
+    else:
+        raise ValueError(f"Unsupported source for single model: {source}")
+
+    model.load_state_dict(state, strict=True)
+    model.eval()
+
+    return model
 
 
 @torch.no_grad()
-def _save_case(
-    out_dir,
-    idx,
-    image,
-    prob,
-    pred,
-):
+def save_case(out_dir: Path, idx: int, image: torch.Tensor, prob: torch.Tensor, pred: torch.Tensor) -> None:
     case_dir = out_dir / f"case_{idx:04d}"
+    case_dir.mkdir(parents=True, exist_ok=True)
 
-    case_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    torch.save(
-        image.cpu(),
-        case_dir / "image.pt",
-    )
-
-    torch.save(
-        prob.cpu(),
-        case_dir / "prob.pt",
-    )
-
-    torch.save(
-        pred.cpu(),
-        case_dir / "pred.pt",
-    )
+    torch.save(image.detach().cpu(), case_dir / "image.pt")
+    torch.save(prob.detach().cpu(), case_dir / "prob.pt")
+    torch.save(pred.detach().cpu(), case_dir / "pred.pt")
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
         "--config",
-        required=True,
+        type=str,
+        default=str(DEFAULT_CONFIG),
+        help="Path to YAML config file. Default is the revised Our Method config.",
     )
+    parser.add_argument("--ckpt", type=str, default="best")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--source", type=str, default="teacher", choices=["teacher", "student", "ensemble"])
+    parser.add_argument("--out", type=str, default="runs/ours/infer")
+    parser.add_argument("--max-cases", default=-1, type=int)
 
-    parser.add_argument(
-        "--ckpt",
-        default="best",
-    )
+    return parser.parse_args()
 
-    parser.add_argument(
-        "--source",
-        default="teacher",
-        choices=[
-            "teacher",
-            "student",
-            "ensemble",
-        ],
-    )
 
-    parser.add_argument(
-        "--split",
-        default="seed_0",
-    )
+@torch.no_grad()
+def main() -> None:
+    args = parse_args()
 
-    parser.add_argument(
-        "--seed",
-        default=0,
-        type=int,
-    )
+    config_path = Path(args.config)
 
-    parser.add_argument(
-        "--out",
-        required=True,
-    )
+    if not config_path.is_absolute():
+        config_path = PROJECT_ROOT / config_path
 
-    parser.add_argument(
-        "--max-cases",
-        default=-1,
-        type=int,
-    )
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config not found: {config_path}")
 
-    args = parser.parse_args()
+    cfg = load_config(config_path)
+    normalize_config_paths(cfg)
 
-    cfg = load_config(args.config)
+    set_seed(int(args.seed))
 
-    set_seed(args.seed)
-
-    ckpt_path = _resolve_ckpt(
-        args.ckpt,
-        args.config,
-        args.split,
-    )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ckpt_path = resolve_ckpt(cfg, args.ckpt, seed=int(args.seed))
 
     if not ckpt_path.exists():
-        raise FileNotFoundError(ckpt_path)
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
-    model = _build_model(cfg)
-
-    ckpt = torch.load(
-        str(ckpt_path),
-        map_location="cpu",
-    )
-
-    if "student" in ckpt:
-        model.load_state_dict(
-            ckpt["student"],
-            strict=False,
-        )
+    if args.source == "ensemble":
+        student = load_state_into_model(cfg, ckpt_path, device, source="student")
+        teacher = load_state_into_model(cfg, ckpt_path, device, source="teacher")
+        model = None
     else:
-        model.load_state_dict(
-            ckpt,
-            strict=False,
-        )
+        model = load_state_into_model(cfg, ckpt_path, device, source=args.source)
+        student = None
+        teacher = None
 
-    # ===== 正确写法 =====
-    loaders = build_dataloaders(cfg["data"])
-
-    trainer = MeanTeacherTrainer(
-        model,
-        cfg,
-    )
-
-    if "teacher" in ckpt:
-        trainer.teacher.load_state_dict(
-            ckpt["teacher"],
-            strict=False,
-        )
-
-    if "student" in ckpt:
-        trainer.student.load_state_dict(
-            ckpt["student"],
-            strict=False,
-        )
-
-    trainer.student.eval()
-    trainer.teacher.eval()
+    loaders = build_dataloaders(cfg.data)
 
     out_dir = Path(args.out)
 
-    out_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    if not out_dir.is_absolute():
+        out_dir = PROJECT_ROOT / out_dir
 
-    threshold = float(
-        cfg.inference.get(
-            "threshold",
-            0.45,
-        )
-    )
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    device = trainer.device
-
+    threshold = float(cfg.inference.get("threshold", 0.5))
     saved = 0
 
     for i, batch in enumerate(loaders["val"]):
-
-        if (
-            args.max_cases > 0
-            and i >= args.max_cases
-        ):
+        if args.max_cases > 0 and i >= args.max_cases:
             break
 
-        x = batch["image"].to(device)
+        x = batch["image"].to(device).float()
 
         if args.source == "ensemble":
+            logits_s = student(x)
+            logits_t = teacher(x)
 
-            z1, _ = trainer.student(x)
-            z2, _ = trainer.teacher(x)
+            if isinstance(logits_s, tuple):
+                logits_s = logits_s[0]
 
-            logits = (z1 + z2) * 0.5
+            if isinstance(logits_t, tuple):
+                logits_t = logits_t[0]
 
-        elif args.source == "teacher":
-
-            logits, _ = trainer.teacher(x)
-
+            logits = 0.5 * (logits_s + logits_t)
         else:
+            logits = model(x)
 
-            logits, _ = trainer.student(x)
+            if isinstance(logits, tuple):
+                logits = logits[0]
 
-        prob = torch.sigmoid(
-            logits.float()
-        )
+        prob = torch.sigmoid(logits.float())
+        pred = (prob > threshold).float()
 
-        pred = (
-            prob > threshold
-        ).float()
-
-        _save_case(
-            out_dir,
-            i,
-            x,
-            prob,
-            pred,
-        )
-
+        save_case(out_dir, i, x, prob, pred)
         saved += 1
 
     print(
@@ -254,6 +193,7 @@ def main():
             "saved_cases": saved,
             "threshold": threshold,
             "ckpt": str(ckpt_path),
+            "source": args.source,
             "output_dir": str(out_dir),
         }
     )

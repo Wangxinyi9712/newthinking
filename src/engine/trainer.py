@@ -287,10 +287,10 @@ class MeanTeacherTrainer:
         return t_u, pseudo, reliability
 
     def _supervised_branch(
-        self,
-        x_l: torch.Tensor,
-        y_l: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            self,
+            x_l: torch.Tensor,
+            y_l: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         s_l, feat_l, sdf_l = self.student(
             x_l,
             return_features=True,
@@ -317,7 +317,7 @@ class MeanTeacherTrainer:
         else:
             loss_phase = s_l.new_tensor(0.0)
 
-        return s_l, feat_l, sdf_l, loss_sup, loss_sdf + loss_phase
+        return s_l, feat_l, sdf_l, loss_sup, loss_sdf, loss_phase
 
     def _mean_teacher_unsup_loss(
         self,
@@ -489,7 +489,7 @@ class MeanTeacherTrainer:
         self.optimizer.zero_grad(set_to_none=True)
 
         with autocast(self._autocast_device(), enabled=self.use_amp):
-            s_l, feat_l, _, loss_sup, loss_geom = self._supervised_branch(x_l, y_l)
+            s_l, feat_l, _, loss_sup, loss_sdf, loss_phase = self._supervised_branch(x_l, y_l)
 
         loss_unsup, loss_spec, loss_ot = self._baseline_unsup_loss(x_l, y_l, x_u)
 
@@ -499,13 +499,13 @@ class MeanTeacherTrainer:
             loss_proto = s_l.new_tensor(0.0)
 
         loss = (
-            loss_sup
-            + self.lambda_unsup * loss_unsup
-            + self.lambda_spec * loss_spec
-            + self.lambda_sdf * loss_geom
-            + self.lambda_phase * s_l.new_tensor(0.0)
-            + self.lambda_ot * loss_ot
-            + self.lambda_proto * loss_proto
+                loss_sup
+                + self.lambda_unsup * loss_unsup
+                + self.lambda_spec * loss_spec
+                + self.lambda_sdf * loss_sdf
+                + self.lambda_phase * loss_phase
+                + self.lambda_ot * loss_ot
+                + self.lambda_proto * loss_proto
         )
 
         if not torch.isfinite(loss):
